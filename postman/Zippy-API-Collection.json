@@ -1,0 +1,112 @@
+{
+  "info": {
+    "name": "Zippy Mock Logistics Platform",
+    "_postman_id": "2f2f4b3e-6b7c-4f95-a9f6-9dd7d2c3f0a1",
+    "description": "Collection for the Zippy mock logistics assignment.",
+    "schema": "https://schema.getpostman.com/json/collection/v2.1.0/collection.json"
+  },
+  "item": [
+    {
+      "name": "Create Order",
+      "request": {
+        "method": "POST",
+        "header": [
+          { "key": "Content-Type", "value": "application/json" }
+        ],
+        "body": {
+          "mode": "raw",
+          "raw": "{\n  \"merchantOrderId\": \"MERCHANT-10001\",\n  \"customer\": {\n    \"name\": \"Rahul Sharma\",\n    \"phone\": \"9876543210\",\n    \"email\": \"rahul@example.com\"\n  },\n  \"pickupAddress\": {\n    \"addressLine1\": \"15 MG Road\",\n    \"city\": \"Bengaluru\",\n    \"state\": \"Karnataka\",\n    \"pincode\": \"560001\"\n  },\n  \"deliveryAddress\": {\n    \"addressLine1\": \"22 Connaught Place\",\n    \"city\": \"New Delhi\",\n    \"state\": \"Delhi\",\n    \"pincode\": \"110001\"\n  },\n  \"package\": {\n    \"weightGrams\": 1500,\n    \"lengthCm\": 20,\n    \"widthCm\": 15,\n    \"heightCm\": 10\n  },\n  \"paymentType\": \"COD\",\n  \"codAmount\": 2500\n}"
+        },
+        "url": "{{baseUrl}}/api/orders"
+      }
+    },
+    {
+      "name": "Get Order",
+      "request": {
+        "method": "GET",
+        "url": "{{baseUrl}}/api/orders/{{orderId}}"
+      }
+    },
+    {
+      "name": "Get Rates",
+      "request": {
+        "method": "GET",
+        "url": "{{baseUrl}}/api/orders/{{orderId}}/rates?sortBy=lowest"
+      }
+    },
+    {
+      "name": "Select Carrier",
+      "request": {
+        "method": "POST",
+        "header": [
+          { "key": "Content-Type", "value": "application/json" }
+        ],
+        "body": {
+          "mode": "raw",
+          "raw": "{\n  \"carrierCode\": \"FASTSHIP\",\n  \"serviceCode\": \"FAST-AIR\",\n  \"quotedAmount\": 182.9\n}"
+        },
+        "url": "{{baseUrl}}/api/orders/{{orderId}}/select-carrier"
+      }
+    },
+    {
+      "name": "Create Shipment",
+      "request": {
+        "method": "POST",
+        "url": "{{baseUrl}}/api/orders/{{orderId}}/create-shipment"
+      }
+    },
+    {
+      "name": "Get Tracking",
+      "request": {
+        "method": "GET",
+        "url": "{{baseUrl}}/api/orders/{{orderId}}/tracking"
+      }
+    },
+    {
+      "name": "FastShip Webhook",
+      "request": {
+        "method": "POST",
+        "header": [
+          { "key": "Content-Type", "value": "application/json" }
+        ],
+        "body": {
+          "mode": "raw",
+          "raw": "{\n  \"shipment_id\": \"FS-700001\",\n  \"tracking_number\": \"FST123456789\",\n  \"event_code\": \"IN_TRANSIT\",\n  \"event_description\": \"Shipment departed Bengaluru hub\",\n  \"event_time\": \"2026-07-25T10:30:00Z\",\n  \"location\": \"Bengaluru Hub\"\n}"
+        },
+        "url": "{{baseUrl}}/api/webhooks/fastship"
+      }
+    },
+    {
+      "name": "QuickExpress Webhook",
+      "request": {
+        "method": "POST",
+        "header": [
+          { "key": "Content-Type", "value": "application/json" }
+        ],
+        "body": {
+          "mode": "raw",
+          "raw": "{\n  \"awb\": \"QE987654321\",\n  \"event\": {\n    \"type\": \"OFD\",\n    \"message\": \"Shipment is out for delivery\",\n    \"occurredAt\": \"2026-07-25T08:15:00Z\"\n  },\n  \"facility\": {\n    \"city\": \"New Delhi\",\n    \"code\": \"DEL-01\"\n  }\n}"
+        },
+        "url": "{{baseUrl}}/api/webhooks/quickexpress"
+      }
+    },
+    {
+      "name": "Reliable Webhook",
+      "request": {
+        "method": "POST",
+        "header": [
+          { "key": "Content-Type", "value": "application/json" }
+        ],
+        "body": {
+          "mode": "raw",
+          "raw": "{\n  \"trackingCode\": \"RC1122334455\",\n  \"statusId\": 50,\n  \"statusText\": \"Delivered\",\n  \"updatedOn\": \"2026-07-25T15:45:00Z\",\n  \"proofOfDelivery\": {\n    \"receivedBy\": \"Rahul Sharma\",\n    \"deliveryLocation\": \"New Delhi\"\n  }\n}"
+        },
+        "url": "{{baseUrl}}/api/webhooks/reliable"
+      }
+    }
+  ],
+  "variable": [
+    { "key": "baseUrl", "value": "http://localhost:3000" },
+    { "key": "orderId", "value": "ZPY-ORD-10001" }
+  ]
+}

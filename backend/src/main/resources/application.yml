@@ -1,0 +1,18 @@
+spring:
+  datasource:
+    url: jdbc:h2:file:./data/zippy;MODE=PostgreSQL;DATABASE_TO_UPPER=false;AUTO_SERVER=TRUE
+    driverClassName: org.h2.Driver
+    username: sa
+    password:
+  flyway:
+    locations: classpath:db/migration
+  sql:
+    init:
+      mode: never
+
+server:
+  port: 8080
+
+logging:
+  level:
+    org.springframework.jdbc.core: warn
