@@ -1,0 +1,204 @@
+﻿Diagnose log at 2026-07-28T14:23:06Z
+
+Executable: C:\Program Files\Git\mingw64\bin\git-credential-manager-core.exe
+Version: 2.0.785+6074e4e3d3
+
+------------
+Diagnostic: Environment
+Skipped: False
+Success: True
+Exception: None
+Log:
+OSType: Windows
+OSVersion: 10.0 (build 26200)
+Reading environment variables... OK
+ Variables:
+HOMEPATH=\Users\Chetan Pande
+DriverData=C:\Windows\System32\Drivers\DriverData
+COMPUTERNAME=LAPTOP-JLARIF07
+MSYSTEM=MINGW64
+CommonProgramFiles(x86)=C:\Program Files (x86)\Common Files
+OneDrive=C:\Users\Chetan Pande\OneDrive
+USERNAME=Chetan Pande
+TMP=C:\Users\CHETAN~1\AppData\Local\Temp
+HOME=C:\Users\Chetan Pande
+PROCESSOR_REVISION=9a03
+CLAUDE_CODE_SSE_PORT=49792
+PATHEXT=.COM;.EXE;.BAT;.CMD;.VBS;.VBE;.JS;.JSE;.WSF;.WSH;.MSC;.PY;.PYW;.CPL
+VSCODE_GIT_ASKPASS_MAIN=c:\Users\Chetan Pande\AppData\Roaming\Code\User\globalStorage\vscode.git\askpass\70789581cae28aa7\askpass-main.js
+VSCODE_JDWP_ADAPTER_ENDPOINTS=c:\Users\Chetan Pande\.vscode\extensions\vscjava.vscode-java-debug-0.59.0\.noConfigDebugAdapterEndpoints\endpoint-2363b510ffe8e977.txt
+GIT_EXEC_PATH=C:/Program Files/Git/mingw64/libexec/git-core
+TEMP=C:\Users\CHETAN~1\AppData\Local\Temp
+LOCALAPPDATA=C:\Users\Chetan Pande\AppData\Local
+PUBLIC=C:\Users\Public
+CHROME_CRASHPAD_PIPE_NAME=\\.\pipe\crashpad_29156_WPHTCJJTMVRDNSOC
+TERM=xterm-256color
+PROCESSOR_IDENTIFIER=Intel64 Family 6 Model 154 Stepping 3, GenuineIntel
+IntelliJ IDEA=C:\Program Files\JetBrains\IntelliJ IDEA 2025.3.1\bin
+VSCODE_PYTHON_AUTOACTIVATE_GUARD=1
+COLORTERM=truecolor
+USERDOMAIN=LAPTOP-JLARIF07
+ProgramFiles(x86)=C:\Program Files (x86)
+EFC_7304_4126798990=1
+Path=C:/Program Files/Git/mingw64/libexec/git-core;C:\Program Files\Git\mingw64\bin;C:\Program Files\Git\usr\bin;C:\Users\Chetan Pande\bin;C:\Program Files\Python311\Scripts\;C:\Program Files\Python311\;C:\Program Files\Common Files\Oracle\Java\javapath;C:\Program Files (x86)\VMware\VMware Player\bin\;C:\WINDOWS\system32;C:\WINDOWS;C:\WINDOWS\System32\Wbem;C:\WINDOWS\System32\WindowsPowerShell\v1.0\;C:\WINDOWS\System32\OpenSSH\;C:\Program Files\Git\cmd;C:\Program Files\dotnet\;C:\Program Files\MongoDB\Server\5.0\bin;C:\MinGW\bin;C:\Program Files\Java\jdk-23\bin;C:\apache-maven-3.9.9\bin;C:\Program Files\nodejs\;C:\Users\Chetan Pande\AppData\Local\Programs\Microsoft VS Code\bin;C:\Users\Chetan Pande\AppData\Local\Packages\PythonSoftwareFoundation.Python.3.10_qbz5n2kfra8p0\LocalCache\local-packages\Python310\Scripts;C:\Program Files\Python310\;C:\Program Files\Python310\Scripts\;C:\Users\Chetan Pande\AppData\Local\Microsoft\WindowsApps;C:\Users\Chetan Pande\AppData\Local\Google\Cloud SDK\google-cloud-sdk\bin;C:\Users\Chetan Pande\AppData\Local\Programs\Ollama;C:\Program Files\Python311\;C:\Program Files\JetBrains\IntelliJ IDEA 2025.3.1\bin;C:\Users\Chetan Pande\AppData\Roaming\npm;C:\Users\Chetan Pande\AppData\Local\Programs\Antigravity\bin;C:\Users\Chetan Pande\.lmstudio\bin;C:\Users\Chetan Pande\AppData\Local\Programs\cursor\resources\app\bin;c:\Users\Chetan Pande\.vscode\extensions\vscjava.vscode-java-debug-0.59.0\bundled\scripts\noConfigScripts
+TERM_PROGRAM=vscode
+PROCESSOR_LEVEL=6
+NUMBER_OF_PROCESSORS=16
+TMPDIR=C:\Users\CHETAN~1\AppData\Local\Temp
+VSCODE_GIT_ASKPASS_EXTRA_ARGS=
+UIPATH_DISABLE_MARKETPLACE_WIDGET=True
+GIT_ASKPASS=c:\Users\Chetan Pande\AppData\Roaming\Code\User\globalStorage\vscode.git\askpass\70789581cae28aa7\askpass.sh
+PSModulePath=C:\Users\Chetan Pande\Documents\WindowsPowerShell\Modules;C:\Users\Chetan Pande\AppData\Local\Google\Cloud SDK\google-cloud-sdk\platform\PowerShell;C:\Program Files\WindowsPowerShell\Modules;C:\WINDOWS\system32\WindowsPowerShell\v1.0\Modules
+VSCODE_JAVA_EXEC=C:\Program Files\Java\jdk-23\bin\java
+VSCODE_GIT_IPC_HANDLE=\\.\pipe\vscode-git-53cf9b003d-sock
+CommonProgramFiles=C:\Program Files (x86)\Common Files
+__PSLockDownPolicy=0
+IGCCSVC_DB=AQAAANCMnd8BFdERjHoAwE/Cl+sBAAAAgvlJiS2ddEyuxpP/X4gCwQQAAAACAAAAAAAQZgAAAAEAACAAAAB+8IrNar1IIhwCWoVb5VJqe1TIUrQex1sJ13XbAAHFgwAAAAAOgAAAAAIAACAAAAAvt0onS8r2BxgQsq2GwgOrvJr5tRo3MFwG9Qll5SbukmAAAADn6Mc6LwWsr5IoJgf4hzNZNKjJoX9v4QOhbGiNqslChZMmyDv85Qk8C3JFCnSypIFpf0uqzKR9hDWAsaJbcTPca23/sHXmeHa+IpdBMhhyjis8/sOLKVMYXKo3u4ujtRpAAAAA4UR5dz+tueqjwGUaIn7ngRtjFNwcL9CiJwKkbT3x4W5mt5Pb9B4U+LdxV4iLYQkP2Y4Mod8ej4YoIusIDglScQ==
+TERM_PROGRAM_VERSION=1.130.0
+PLINK_PROTOCOL=ssh
+ProgramData=C:\ProgramData
+ProgramW6432=C:\Program Files
+ProgramFiles=C:\Program Files (x86)
+VSCODE_GIT_ASKPASS_NODE=C:\Users\Chetan Pande\AppData\Local\Programs\Microsoft VS Code\Code.exe
+SystemRoot=C:\WINDOWS
+SESSIONNAME=Console
+CommonProgramW6432=C:\Program Files\Common Files
+ZES_ENABLE_SYSMAN=1
+LOGONSERVER=\\LAPTOP-JLARIF07
+USERPROFILE=C:\Users\Chetan Pande
+USERDOMAIN_ROAMINGPROFILE=LAPTOP-JLARIF07
+APPDATA=C:\Users\Chetan Pande\AppData\Roaming
+HOMEDRIVE=C:
+VSCODE_INJECTION=1
+VBOX_MSI_INSTALL_PATH=C:\Program Files\Oracle\VirtualBox\
+EFC_7304_1592913036=1
+PROCESSOR_ARCHITEW6432=AMD64
+PROCESSOR_ARCHITECTURE=x86
+OS=Windows_NT
+ComSpec=C:\WINDOWS\system32\cmd.exe
+SystemDrive=C:
+windir=C:\WINDOWS
+LANG=en_US.UTF-8
+ALLUSERSPROFILE=C:\ProgramData
+
+
+------------
+Diagnostic: File system
+Skipped: False
+Success: True
+Exception: None
+Log:
+Temporary directory is 'C:\Users\Chetan Pande\AppData\Local\Temp\'...
+Checking basic file I/O...
+Writing to temporary file 'C:\Users\Chetan Pande\AppData\Local\Temp\e18c42c9ade076024ca06771'... OK
+Reading from temporary file 'C:\Users\Chetan Pande\AppData\Local\Temp\e18c42c9ade076024ca06771'... OK
+Deleting temporary file 'C:\Users\Chetan Pande\AppData\Local\Temp\e18c42c9ade076024ca06771'... OK
+Testing IFileSystem instance...
+UserHomePath: C:\Users\Chetan Pande
+UserDataDirectoryPath: C:\Users\Chetan Pande\.gcm
+GetCurrentDirectory(): C:\zippy.ai assignment
+
+------------
+Diagnostic: Networking
+Skipped: False
+Success: True
+Exception: None
+Log:
+Checking basic networking and HTTP stack...
+Creating HTTP client... OK
+IsNetworkAvailable: True
+Sending HEAD request to http://example.com... OK
+Sending HEAD request to https://example.com... OK
+Acquiring free TCP port... OK
+Testing local HTTP loopback connections...
+Creating new HTTP listener for http://localhost:52126/... OK
+Waiting for loopback connection... OK
+Writing response... OK
+Waiting for response data... OK
+Loopback connection data OK
+Testing with IHttpClientFactory created HTTP client...
+Creating HTTP client... OK
+IsNetworkAvailable: True
+Sending HEAD request to http://example.com... OK
+Sending HEAD request to https://example.com... OK
+Acquiring free TCP port... OK
+Testing local HTTP loopback connections...
+Creating new HTTP listener for http://localhost:52128/... OK
+Waiting for loopback connection... OK
+Writing response... OK
+Waiting for response data... OK
+Loopback connection data OK
+
+------------
+Diagnostic: Git
+Skipped: False
+Success: True
+Exception: None
+Log:
+Getting Git version... OK
+Git version is '2.38.1.windows.1'
+Locating current repository... OK
+Git repository at 'C:/zippy.ai assignment/.git'
+Listing all Git configuration... OK
+Git configuration:
+file:C:/Program Files/Git/etc/gitconfig	diff.astextplain.textconv=astextplain
+file:C:/Program Files/Git/etc/gitconfig	filter.lfs.clean=git-lfs clean -- %f
+file:C:/Program Files/Git/etc/gitconfig	filter.lfs.smudge=git-lfs smudge -- %f
+file:C:/Program Files/Git/etc/gitconfig	filter.lfs.process=git-lfs filter-process
+file:C:/Program Files/Git/etc/gitconfig	filter.lfs.required=true
+file:C:/Program Files/Git/etc/gitconfig	http.sslbackend=openssl
+file:C:/Program Files/Git/etc/gitconfig	http.sslcainfo=C:/Program Files/Git/mingw64/ssl/certs/ca-bundle.crt
+file:C:/Program Files/Git/etc/gitconfig	core.autocrlf=true
+file:C:/Program Files/Git/etc/gitconfig	core.fscache=true
+file:C:/Program Files/Git/etc/gitconfig	core.symlinks=false
+file:C:/Program Files/Git/etc/gitconfig	pull.rebase=false
+file:C:/Program Files/Git/etc/gitconfig	credential.helper=manager-core
+file:C:/Program Files/Git/etc/gitconfig	credential.https://dev.azure.com.usehttppath=true
+file:C:/Program Files/Git/etc/gitconfig	init.defaultbranch=master
+file:C:/Users/Chetan Pande/.gitconfig	user.email=chetanpandey5443@gmail.com
+file:C:/Users/Chetan Pande/.gitconfig	user.name=Chetan4458
+file:.git/config	core.repositoryformatversion=0
+file:.git/config	core.filemode=false
+file:.git/config	core.bare=false
+file:.git/config	core.logallrefupdates=true
+file:.git/config	core.symlinks=false
+file:.git/config	core.ignorecase=true
+file:.git/config	remote.origin.url=https://github.com/Chetan4458/Zippy-Assignment.git
+file:.git/config	remote.origin.fetch=+refs/heads/*:refs/remotes/origin/*
+
+
+------------
+Diagnostic: Credential storage
+Skipped: False
+Success: True
+Exception: None
+Log:
+ICredentialStore instance is of type: CredentialStore
+Writing test credential... OK
+Reading test credential... OK
+Deleting test credential... OK
+
+------------
+Diagnostic: Microsoft authentication (AAD/MSA)
+Skipped: False
+Success: True
+Exception: None
+Log:
+Broker not supported.
+Flow type is: Auto
+Gathering MSAL token cache data... OK
+CacheDirectory: C:\Users\Chetan Pande\AppData\Local\.IdentityService
+CacheFileName: msal.cache
+CacheFilePath: C:\Users\Chetan Pande\AppData\Local\.IdentityService\msal.cache
+Creating cache helper... OK
+Verifying MSAL token cache persistence... OK
+
+------------
+Diagnostic: GitHub API
+Skipped: False
+Success: True
+Exception: None
+Log:
+Using 'https://github.com/' as API target.
+Querying '/meta' endpoint... OK
+

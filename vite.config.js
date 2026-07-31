@@ -8,10 +8,10 @@ export default defineConfig({
     port: 5174,
     strictPort: true,
     proxy: {
-      '/api': 'http://127.0.0.1:8080',
-      '/fastship': 'http://127.0.0.1:8080',
-      '/quickexpress': 'http://127.0.0.1:8080',
-      '/reliablecourier': 'http://127.0.0.1:8080',
+      '/api': process.env.VITE_API_PROXY_TARGET || 'http://127.0.0.1:8080',
+      '/fastship': process.env.VITE_API_PROXY_TARGET || 'http://127.0.0.1:8080',
+      '/quickexpress': process.env.VITE_API_PROXY_TARGET || 'http://127.0.0.1:8080',
+      '/reliablecourier': process.env.VITE_API_PROXY_TARGET || 'http://127.0.0.1:8080',
     },
   },
   build: {

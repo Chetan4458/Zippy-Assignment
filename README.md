@@ -27,7 +27,9 @@ npm install
 npm run dev
 ```
 
-Open the React app at `http://localhost:5173`. The Vite dev server proxies API calls to Spring Boot on `http://localhost:8080`.
+`npm run dev` starts both the Spring Boot backend and the Vite frontend. Open the app in your browser at `http://localhost:5174`.
+
+The frontend proxies API calls to Spring Boot on `http://localhost:8080`, so the backend must be running for order creation and history loading.
 
 If you want the backend only:
 
@@ -47,6 +49,8 @@ The schema is defined in:
 
 - `backend/src/main/resources/db/migration/V1__init.sql`
 - `backend/src/main/resources/db/migration/V2__seed.sql`
+
+The runtime database uses in-memory H2, so the app starts with a clean database on every backend restart. Flyway rebuilds the schema automatically.
 
 ## API Endpoints
 

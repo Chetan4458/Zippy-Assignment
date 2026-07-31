@@ -8,6 +8,7 @@ import com.zippy.backend.dto.OrderCreateRequest;
 import com.zippy.backend.exception.ApiException;
 import java.math.BigDecimal;
 import java.math.RoundingMode;
+import java.nio.charset.StandardCharsets;
 import java.sql.ResultSet;
 import java.sql.SQLException;
 import java.time.Instant;
@@ -19,6 +20,8 @@ import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.Objects;
+import java.security.MessageDigest;
+import java.security.NoSuchAlgorithmException;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.TimeUnit;
@@ -73,7 +76,19 @@ public class ZippyService {
   }
 
   @Transactional
-  public Map<String, Object> createOrder(OrderCreateRequest request) {
+  public Map<String, Object> createOrder(OrderCreateRequest request, String idempotencyKey) {
+    String normalizedKey = normalizeIdempotencyKey(idempotencyKey);
+    String requestHash = normalizedKey == null ? null : hashOrderRequest(request);
+    if (normalizedKey != null) {
+      IdempotencyRecord existing = findIdempotencyRecord(normalizedKey);
+      if (existing != null) {
+        if (!Objects.equals(existing.requestHash(), requestHash)) {
+          throw new ApiException(409, "Idempotency key reused with a different request");
+        }
+        return parseMap(existing.responseJson());
+      }
+    }
+
     validateOrder(request);
     String now = now();
     String orderId = nextOrderId();
@@ -117,7 +132,15 @@ public class ZippyService {
     OrderRow order = findOrderByZippyId(orderId);
     List<ShippingQuote> quotes = getCarrierQuotes(order);
     insertQuotes(order, quotes, now);
-    return getOrder(orderId);
+    Map<String, Object> response = getOrder(orderId);
+    if (normalizedKey != null) {
+      storeIdempotencyRecord(normalizedKey, requestHash, response, now);
+    }
+    return response;
+  }
+
+  public Map<String, Object> createOrder(OrderCreateRequest request) {
+    return createOrder(request, null);
   }
 
   public Map<String, Object> getOrder(String orderId) {
@@ -130,6 +153,50 @@ public class ZippyService {
 
   public Map<String, Object> getTracking(String orderId) {
     return getOrder(orderId);
+  }
+
+  public Map<String, Object> getOrderHistory(int limit, int offset) {
+    int safeLimit = Math.max(1, Math.min(limit, 50));
+    int safeOffset = Math.max(0, offset);
+    List<OrderRow> orders = jdbcTemplate.query("""
+        SELECT * FROM orders
+        ORDER BY id DESC
+        LIMIT ? OFFSET ?
+        """, orderRowMapper, safeLimit, safeOffset);
+
+    Map<String, Object> response = new LinkedHashMap<>();
+    response.put("limit", safeLimit);
+    response.put("offset", safeOffset);
+    response.put("totalOrders", countRows("orders"));
+    response.put("orders", orders.stream().map(this::orderHistoryToMap).toList());
+    return response;
+  }
+
+  public Map<String, Object> getShipmentEvents(String orderId, int limit, int offset) {
+    OrderRow order = findOrderByZippyId(orderId);
+    ShipmentRow shipment = findShipment(order.id());
+    List<ShipmentEventRow> allEvents = shipment == null ? List.of() : listEvents(shipment.id());
+    List<ShipmentEventRow> page = pageItems(allEvents, limit, offset);
+    Map<String, Object> response = new LinkedHashMap<>();
+    response.put("orderId", orderId);
+    response.put("totalEvents", allEvents.size());
+    response.put("limit", Math.max(0, limit));
+    response.put("offset", Math.max(0, offset));
+    response.put("events", page.stream().map(this::eventToMap).toList());
+    return response;
+  }
+
+  public Map<String, Object> getSystemOverview() {
+    Map<String, Object> overview = new LinkedHashMap<>();
+    overview.put("orders", countRows("orders"));
+    overview.put("quotes", countRows("shipping_quotes"));
+    overview.put("shipments", countRows("shipments"));
+    overview.put("events", countRows("shipment_events"));
+    overview.put("automationEnabled", automationEnabled);
+    overview.put("carrierTimeoutMs", DEFAULT_CARRIER_TIMEOUT_MS);
+    overview.put("runtimeFlags", getRuntimeFlags());
+    overview.put("supportedCarriers", List.of("FASTSHIP", "QUICKEXPRESS", "RELIABLE"));
+    return overview;
   }
 
   public Map<String, Object> getRates(String orderId, String sortBy) {
@@ -524,6 +591,63 @@ public class ZippyService {
 
   private List<ShipmentEventRow> listEvents(long shipmentId) {
     return jdbcTemplate.query("SELECT * FROM shipment_events WHERE shipment_id = ? ORDER BY event_time ASC, id ASC", shipmentEventRowMapper, shipmentId);
+  }
+
+  private <T> List<T> pageItems(List<T> items, int limit, int offset) {
+    int safeLimit = Math.max(0, limit);
+    int safeOffset = Math.max(0, offset);
+    if (safeLimit == 0 || safeOffset >= items.size()) {
+      return List.of();
+    }
+    int end = Math.min(items.size(), safeOffset + safeLimit);
+    return new ArrayList<>(items.subList(safeOffset, end));
+  }
+
+  private long countRows(String table) {
+    Long count = jdbcTemplate.queryForObject("SELECT COUNT(*) FROM " + table, Long.class);
+    return count == null ? 0L : count;
+  }
+
+  private Map<String, Object> orderHistoryToMap(OrderRow order) {
+    ShipmentRow shipment = findShipment(order.id());
+    Map<String, Object> response = new LinkedHashMap<>();
+    response.put("zippyOrderId", order.zippyOrderId());
+    response.put("merchantOrderId", order.merchantOrderId());
+    response.put("orderStatus", order.orderStatus());
+    response.put("paymentType", order.paymentType());
+    response.put("codAmount", order.codAmount());
+    response.put("createdAt", order.createdAt());
+    response.put("updatedAt", order.updatedAt());
+    response.put("pickupPincode", order.pickupPincode());
+    response.put("deliveryPincode", order.deliveryPincode());
+    response.put("selectedShipment", shipment == null ? null : Map.of(
+        "carrierCode", shipment.carrierCode(),
+        "selectedServiceCode", shipment.selectedServiceCode(),
+        "trackingNumber", shipment.trackingNumber(),
+        "quotedAmount", shipment.quotedAmount(),
+        "currentStatus", shipment.currentStatus()
+    ));
+    return response;
+  }
+
+  private IdempotencyRecord findIdempotencyRecord(String idempotencyKey) {
+    try {
+      return jdbcTemplate.queryForObject(
+          "SELECT * FROM idempotency_keys WHERE idempotency_key = ?",
+          idempotencyRowMapper,
+          idempotencyKey
+      );
+    } catch (Exception exception) {
+      return null;
+    }
+  }
+
+  private void storeIdempotencyRecord(String idempotencyKey, String requestHash, Map<String, Object> response, String now) {
+    jdbcTemplate.update("""
+        MERGE INTO idempotency_keys (idempotency_key, request_hash, response_json, created_at)
+        KEY(idempotency_key)
+        VALUES (?, ?, ?, ?)
+        """, idempotencyKey, requestHash, toJson(response), now);
   }
 
   private Map<String, Object> recordCarrierEvent(ShipmentRow shipment, JsonNode payload, String receivedAt) {
@@ -956,6 +1080,28 @@ public class ZippyService {
     }
   }
 
+  private String normalizeIdempotencyKey(String idempotencyKey) {
+    if (idempotencyKey == null) {
+      return null;
+    }
+    String normalized = idempotencyKey.trim();
+    return normalized.isEmpty() ? null : normalized;
+  }
+
+  private String hashOrderRequest(OrderCreateRequest request) {
+    try {
+      MessageDigest digest = MessageDigest.getInstance("SHA-256");
+      byte[] hash = digest.digest(toJson(request).getBytes(StandardCharsets.UTF_8));
+      StringBuilder builder = new StringBuilder();
+      for (byte value : hash) {
+        builder.append(String.format("%02x", value));
+      }
+      return builder.toString();
+    } catch (NoSuchAlgorithmException exception) {
+      throw new ApiException(500, "Unable to hash order request");
+    }
+  }
+
   private ShippingQuote parseQuote(String json) {
     try {
       return objectMapper.readValue(json, new TypeReference<>() {});
@@ -1031,6 +1177,13 @@ public class ZippyService {
       rs.getString("event_time"),
       rs.getString("raw_event_payload"),
       rs.getString("received_at")
+  );
+
+  private final RowMapper<IdempotencyRecord> idempotencyRowMapper = (rs, rowNum) -> new IdempotencyRecord(
+      rs.getString("idempotency_key"),
+      rs.getString("request_hash"),
+      rs.getString("response_json"),
+      rs.getString("created_at")
   );
 
   private BigDecimal money(double value) {
@@ -1251,5 +1404,12 @@ public class ZippyService {
       String description,
       String location,
       String eventTime
+  ) {}
+
+  private record IdempotencyRecord(
+      String idempotencyKey,
+      String requestHash,
+      String responseJson,
+      String createdAt
   ) {}
 }

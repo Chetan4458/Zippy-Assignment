@@ -75,3 +75,10 @@ CREATE TABLE IF NOT EXISTS app_meta (
   meta_key VARCHAR(64) PRIMARY KEY,
   meta_value VARCHAR(64) NOT NULL
 );
+
+CREATE TABLE IF NOT EXISTS idempotency_keys (
+  idempotency_key VARCHAR(128) PRIMARY KEY,
+  request_hash VARCHAR(64) NOT NULL,
+  response_json CLOB NOT NULL,
+  created_at VARCHAR(40) NOT NULL
+);

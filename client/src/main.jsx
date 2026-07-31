@@ -68,19 +68,54 @@ function estimateLabel(option) {
 }
 
 async function api(path, options = {}) {
-  const response = await fetch(path, {
-    headers: {
-      'content-type': 'application/json',
-      ...(options.headers || {}),
-    },
-    ...options,
-  });
+  let response;
+
+  try {
+    response = await fetch(path, {
+      headers: {
+        'content-type': 'application/json',
+        ...(options.headers || {}),
+      },
+      ...options,
+    });
+  } catch {
+    throw new Error('Backend is not reachable. Start Spring Boot on port 8080 or run `npm run dev`.');
+  }
+
   const text = await response.text();
-  const body = text ? JSON.parse(text) : null;
+  let body = null;
+
+  if (text) {
+    try {
+      body = JSON.parse(text);
+    } catch {
+      body = { message: text };
+    }
+  }
+
   if (!response.ok) {
+    if ([502, 503, 504].includes(response.status)) {
+      throw new Error('Backend is not reachable. Start Spring Boot on port 8080 or run `npm run dev`.');
+    }
     throw new Error(body?.message || `Request failed with ${response.status}`);
   }
   return body;
+}
+
+function formatDateTime(value) {
+  if (!value) {
+    return 'Just now';
+  }
+
+  const date = new Date(value);
+  if (Number.isNaN(date.getTime())) {
+    return value;
+  }
+
+  return date.toLocaleString('en-IN', {
+    dateStyle: 'medium',
+    timeStyle: 'short',
+  });
 }
 
 function shellValue(source, key) {
@@ -118,6 +153,19 @@ function MetricCard({ label, value, tone }) {
 
 function StatusPill({ status }) {
   return <span className={`status-pill ${statusTone(status)}`}>{status.replaceAll('_', ' ')}</span>;
+}
+
+function historyActionLabel(item) {
+  const status = item.selectedShipment?.currentStatus || item.orderStatus || 'ORDER_CREATED';
+  if (status === 'ORDER_CREATED' || status === 'CARRIER_SELECTED') {
+    return item.selectedShipment ? 'Update carrier' : 'Select carrier';
+  }
+  return 'View details';
+}
+
+function historyActionVariant(item) {
+  const status = item.selectedShipment?.currentStatus || item.orderStatus || 'ORDER_CREATED';
+  return status === 'ORDER_CREATED' || status === 'CARRIER_SELECTED' ? 'primary' : 'ghost';
 }
 
 function SectionHeader({ eyebrow, title, subtitle, action }) {
@@ -175,6 +223,8 @@ function App() {
   const [selectedCarrier, setSelectedCarrier] = useState(null);
   const [tracking, setTracking] = useState(null);
   const [creatingShipment, setCreatingShipment] = useState(false);
+  const [systemOverview, setSystemOverview] = useState(null);
+  const [orderHistory, setOrderHistory] = useState([]);
   const createFormRef = useRef(null);
 
   useEffect(() => {
@@ -205,6 +255,52 @@ function App() {
       }
     };
   }, [order?.zippy_order_id, screen]);
+
+  useEffect(() => {
+    let cancelled = false;
+
+    async function refreshSystemOverview() {
+      try {
+        const payload = await api('/api/system/overview');
+        if (!cancelled) {
+          setSystemOverview(payload);
+        }
+      } catch {
+        // Best effort observability panel.
+      }
+    }
+
+    refreshSystemOverview();
+    const interval = setInterval(refreshSystemOverview, 10000);
+
+    return () => {
+      cancelled = true;
+      clearInterval(interval);
+    };
+  }, []);
+
+  useEffect(() => {
+    let cancelled = false;
+
+    async function refreshOrderHistory() {
+      try {
+        const payload = await api('/api/orders/history?limit=6');
+        if (!cancelled) {
+          setOrderHistory(payload.orders || []);
+        }
+      } catch {
+        // Best effort history panel.
+      }
+    }
+
+    refreshOrderHistory();
+    const interval = setInterval(refreshOrderHistory, 12000);
+
+    return () => {
+      cancelled = true;
+      clearInterval(interval);
+    };
+  }, []);
 
   useEffect(() => {
     let cancelled = false;
@@ -316,7 +412,7 @@ function App() {
       return;
     }
     try {
-      await api(`/api/orders/${order.zippy_order_id}/select-carrier`, {
+      const payload = await api(`/api/orders/${order.zippy_order_id}/select-carrier`, {
         method: 'POST',
         body: JSON.stringify({
           carrierCode: option.carrierCode,
@@ -324,6 +420,19 @@ function App() {
           quotedAmount: option.totalCharge,
         }),
       });
+      if (payload?.selectedShipment) {
+        setOrder((current) =>
+          current
+            ? {
+                ...current,
+                selectedShipment: {
+                  ...current.selectedShipment,
+                  ...payload.selectedShipment,
+                },
+              }
+            : current,
+        );
+      }
       setSelectedCarrier(option);
       setStatusMessage(`Selected ${option.carrierName}`);
     } catch (error) {
@@ -374,6 +483,41 @@ function App() {
     } catch (error) {
       setErrorMessage(error.message);
     }
+  }
+
+  async function handleOpenHistoryOrder(item) {
+    try {
+      const payload = await api(`/api/orders/${item.zippyOrderId}`);
+      const selectedShipment = payload.selectedShipment;
+      const matchedCarrier = payload.shippingOptions?.find(
+        (option) =>
+          option.carrierCode === selectedShipment?.carrier_code &&
+          option.serviceCode === selectedShipment?.selected_service_code,
+      );
+
+      setOrder(payload);
+      setRates(payload.shippingOptions || []);
+      setSelectedCarrier(matchedCarrier || null);
+      setTracking(payload);
+      setStatusMessage(`Loaded ${payload.zippy_order_id} from history`);
+      setErrorMessage('');
+
+      const status = currentStatusFor(payload);
+      startTransition(() => setScreen(status === 'ORDER_CREATED' || status === 'CARRIER_SELECTED' ? 'rates' : 'details'));
+    } catch (error) {
+      setErrorMessage(error.message);
+    }
+  }
+
+  function handleStartNewOrder() {
+    setOrder(null);
+    setTracking(null);
+    setRates([]);
+    setSelectedCarrier(null);
+    setCreatingShipment(false);
+    setStatusMessage('Ready to create a new order');
+    setErrorMessage('');
+    startTransition(() => setScreen('create'));
   }
 
   function useSampleData() {
@@ -445,6 +589,45 @@ function App() {
 
           <div style={{ height: '1rem' }} />
 
+          {systemOverview ? (
+            <section className="system-card">
+              <div className="system-head">
+                <div>
+                  <p className="section-label">System design</p>
+                  <h3>Operational snapshot</h3>
+                </div>
+                <span className={`system-badge ${systemOverview.automationEnabled ? 'on' : 'off'}`}>
+                  {systemOverview.automationEnabled ? 'Automation on' : 'Automation off'}
+                </span>
+              </div>
+
+              <div className="system-stats">
+                <div>
+                  <strong>{systemOverview.orders ?? 0}</strong>
+                  <span>Orders</span>
+                </div>
+                <div>
+                  <strong>{systemOverview.shipments ?? 0}</strong>
+                  <span>Shipments</span>
+                </div>
+                <div>
+                  <strong>{systemOverview.events ?? 0}</strong>
+                  <span>Events</span>
+                </div>
+                <div>
+                  <strong>{systemOverview.carrierTimeoutMs ?? 0}ms</strong>
+                  <span>Carrier timeout</span>
+                </div>
+              </div>
+
+              <div className="system-foot">
+                <span>{systemOverview.supportedCarriers?.join(' | ')}</span>
+              </div>
+            </section>
+          ) : null}
+
+          <div style={{ height: '1rem' }} />
+
           <WorkflowRail step={currentStage} />
         </div>
 
@@ -456,7 +639,11 @@ function App() {
       <section className="panel">
         <header className="topbar">
           <div className="segmented">
-            <button type="button" className={screen === 'create' ? 'active' : ''} onClick={() => setScreen('create')}>
+            <button
+              type="button"
+              className={screen === 'create' ? 'active' : ''}
+              onClick={handleStartNewOrder}
+            >
               Create Order
             </button>
             <button
@@ -480,6 +667,60 @@ function App() {
 
         {statusMessage ? <div className="notice success">{statusMessage}</div> : null}
         {errorMessage ? <div className="notice error">{errorMessage}</div> : null}
+
+        <section className="workspace-banner">
+          <div className="workspace-copy">
+            <p className="section-label">Operations workspace</p>
+            <h2>Order intake, carrier selection, and tracking in one calm view.</h2>
+            <p className="subtle">
+              The left rail keeps the journey visible while this panel handles the active order, rate comparison, and
+              webhook history.
+            </p>
+          </div>
+
+          <div className="workspace-tags">
+            <span>Single scroll</span>
+            <span>Live history</span>
+            <span>H2 + Flyway</span>
+          </div>
+        </section>
+
+        <section className="history-card">
+          <div className="history-card-head">
+            <div>
+              <p className="section-label">Order history</p>
+              <h3>Recent orders</h3>
+            </div>
+            <span>{orderHistory.length} shown</span>
+          </div>
+
+          {orderHistory.length ? (
+            <div className="order-history-list">
+              {orderHistory.map((item) => (
+                <article key={item.zippyOrderId} className="order-history-item">
+                  <div className="order-history-main">
+                    <strong>{item.zippyOrderId}</strong>
+                    <span>{item.merchantOrderId}</span>
+                  </div>
+                  <div className="order-history-meta">
+                    <span>{item.orderStatus?.replaceAll('_', ' ')}</span>
+                    <span>{item.selectedShipment?.carrierCode || 'No carrier yet'}</span>
+                    <small>{formatDateTime(item.updatedAt)}</small>
+                    <button
+                      type="button"
+                      className={historyActionVariant(item)}
+                      onClick={() => handleOpenHistoryOrder(item)}
+                    >
+                      {historyActionLabel(item)}
+                    </button>
+                  </div>
+                </article>
+              ))}
+            </div>
+          ) : (
+            <div className="empty">No orders created yet.</div>
+          )}
+        </section>
 
         {screen === 'create' ? (
           <section className="card">
@@ -579,63 +820,58 @@ function App() {
             />
 
             {rates.length ? (
-              <div className="table-shell">
-                <table>
-                  <thead>
-                    <tr>
-                      <th>Carrier</th>
-                      <th>Service</th>
-                      <th>Base</th>
-                      <th>COD</th>
-                      <th>Other</th>
-                      <th>Tax</th>
-                      <th>Total</th>
-                      <th>ETA</th>
-                      <th />
-                    </tr>
-                  </thead>
-                  <tbody>
-                    {rates.map((rate) => {
-                      const isSelected =
-                        selectedCarrier?.carrierCode === rate.carrierCode &&
-                        selectedCarrier?.serviceCode === rate.serviceCode;
+              <div className="rates-grid">
+                {rates.map((rate) => {
+                  const isSelected =
+                    selectedCarrier?.carrierCode === rate.carrierCode &&
+                    selectedCarrier?.serviceCode === rate.serviceCode;
 
-                      return (
-                        <tr key={`${rate.carrierCode}:${rate.serviceCode}`}>
-                          <td>
-                            <div className="cell-stack">
-                              <strong>{rate.carrierName}</strong>
-                              <span>{rate.carrierCode}</span>
-                            </div>
-                          </td>
-                          <td>
-                            <div className="cell-stack">
-                              <strong>{rate.serviceName}</strong>
-                              <span>{rate.serviceCode}</span>
-                            </div>
-                          </td>
-                          <td>{money(rate.baseCharge)}</td>
-                          <td>{money(rate.codCharge)}</td>
-                          <td>{money(rate.additionalCharges)}</td>
-                          <td>{money(rate.tax)}</td>
-                          <td>
-                            <strong>{money(rate.totalCharge)}</strong>
-                          </td>
-                          <td>{estimateLabel(rate)}</td>
-                          <td>
-                            <button
-                              type="button"
-                              className={isSelected ? 'selected' : ''}
-                              onClick={() => handleSelectCarrier(rate)}
-                            >
-                              {isSelected ? 'Selected' : 'Select'}
-                            </button>
-                          </td>
-                        </tr>
-                      );
-                    })}
-                  </tbody>
-                </table>
+                  return (
+                    <article key={`${rate.carrierCode}:${rate.serviceCode}`} className={`rate-card ${isSelected ? 'selected' : ''}`}>
+                      <div className="rate-card-head">
+                        <div>
+                          <p className="section-label">Carrier quote</p>
+                          <h3>{rate.carrierName}</h3>
+                          <p className="subtle">
+                            {rate.serviceName} · {rate.serviceCode}
+                          </p>
+                        </div>
+                        <button
+                          type="button"
+                          className={isSelected ? 'selected' : 'primary'}
+                          onClick={() => handleSelectCarrier(rate)}
+                        >
+                          {isSelected ? 'Selected' : 'Select carrier'}
+                        </button>
+                      </div>
+
+                      <div className="rate-grid">
+                        <div>
+                          <span>Base</span>
+                          <strong>{money(rate.baseCharge)}</strong>
+                        </div>
+                        <div>
+                          <span>COD</span>
+                          <strong>{money(rate.codCharge)}</strong>
+                        </div>
+                        <div>
+                          <span>Other</span>
+                          <strong>{money(rate.additionalCharges)}</strong>
+                        </div>
+                        <div>
+                          <span>Tax</span>
+                          <strong>{money(rate.tax)}</strong>
+                        </div>
+                      </div>
+
+                      <div className="rate-card-foot">
+                        <strong>{money(rate.totalCharge)}</strong>
+                        <span>{estimateLabel(rate)}</span>
+                        <small>{rate.carrierCode}</small>
+                      </div>
+                    </article>
+                  );
+                })}
               </div>
             ) : (
               <div className="empty">No shipping options yet.</div>

@@ -13,6 +13,7 @@ import org.springframework.web.bind.annotation.PathVariable;
 import org.springframework.web.bind.annotation.PostMapping;
 import org.springframework.web.bind.annotation.PutMapping;
 import org.springframework.web.bind.annotation.RequestBody;
+import org.springframework.web.bind.annotation.RequestHeader;
 import org.springframework.web.bind.annotation.RequestMapping;
 import org.springframework.web.bind.annotation.RequestParam;
 import org.springframework.web.bind.annotation.RestController;
@@ -27,13 +28,24 @@ public class ZippyController {
   }
 
   @PostMapping("/api/orders")
-  public ResponseEntity<Map<String, Object>> createOrder(@Valid @RequestBody OrderCreateRequest request) {
-    return ResponseEntity.status(HttpStatus.CREATED).body(zippyService.createOrder(request));
+  public ResponseEntity<Map<String, Object>> createOrder(
+      @Valid @RequestBody OrderCreateRequest request,
+      @RequestHeader(value = "Idempotency-Key", required = false) String idempotencyKey
+  ) {
+    return ResponseEntity.status(HttpStatus.CREATED).body(zippyService.createOrder(request, idempotencyKey));
   }
 
   @GetMapping("/api/orders/{orderId}")
   public Map<String, Object> getOrder(@PathVariable String orderId) {
     return zippyService.getOrder(orderId);
+  }
+
+  @GetMapping("/api/orders/history")
+  public Map<String, Object> getOrderHistory(
+      @RequestParam(defaultValue = "5") int limit,
+      @RequestParam(defaultValue = "0") int offset
+  ) {
+    return zippyService.getOrderHistory(limit, offset);
   }
 
   @GetMapping("/api/orders/{orderId}/rates")
@@ -54,6 +66,20 @@ public class ZippyController {
   @GetMapping("/api/orders/{orderId}/tracking")
   public Map<String, Object> getTracking(@PathVariable String orderId) {
     return zippyService.getTracking(orderId);
+  }
+
+  @GetMapping("/api/orders/{orderId}/events")
+  public Map<String, Object> getEvents(
+      @PathVariable String orderId,
+      @RequestParam(defaultValue = "10") int limit,
+      @RequestParam(defaultValue = "0") int offset
+  ) {
+    return zippyService.getShipmentEvents(orderId, limit, offset);
+  }
+
+  @GetMapping("/api/system/overview")
+  public Map<String, Object> getSystemOverview() {
+    return zippyService.getSystemOverview();
   }
 
   @PostMapping("/api/webhooks/fastship")

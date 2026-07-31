@@ -40,6 +40,7 @@ class ZippyControllerTest {
     jdbcTemplate.execute("DELETE FROM shipments");
     jdbcTemplate.execute("DELETE FROM shipping_quotes");
     jdbcTemplate.execute("DELETE FROM orders");
+    jdbcTemplate.execute("DELETE FROM idempotency_keys");
     jdbcTemplate.execute("MERGE INTO app_meta (meta_key, meta_value) KEY(meta_key) VALUES ('order_sequence', '10000')");
     zippyService.resetRuntimeFlags();
   }
@@ -257,6 +258,100 @@ class ZippyControllerTest {
         .andExpect(jsonPath("$.selectedShipment.quoted_amount").value(Double.parseDouble(quotedAmount)));
   }
 
+  @Test
+  void reusesOrderResponseForSameIdempotencyKey() throws Exception {
+    String requestBody = objectMapper.writeValueAsString(sampleOrder());
+
+    String first = mockMvc.perform(post("/api/orders")
+            .header("Idempotency-Key", "order-key-123")
+            .contentType("application/json")
+            .content(requestBody))
+        .andExpect(status().isCreated())
+        .andReturn()
+        .getResponse()
+        .getContentAsString();
+
+    String second = mockMvc.perform(post("/api/orders")
+            .header("Idempotency-Key", "order-key-123")
+            .contentType("application/json")
+            .content(requestBody))
+        .andExpect(status().isCreated())
+        .andReturn()
+        .getResponse()
+        .getContentAsString();
+
+    assertThat(objectMapper.readTree(second).path("zippy_order_id").asText())
+        .isEqualTo(objectMapper.readTree(first).path("zippy_order_id").asText());
+
+    Integer orderCount = jdbcTemplate.queryForObject("SELECT COUNT(*) FROM orders", Integer.class);
+    assertThat(orderCount).isEqualTo(1);
+  }
+
+  @Test
+  void returnsPagedEventsForShipmentHistory() throws Exception {
+    JsonNode orderBody = createOrder();
+    JsonNode fastShipQuote = findQuote(orderBody, "FASTSHIP");
+
+    mockMvc.perform(post("/api/orders/{orderId}/select-carrier", "ZPY-ORD-10001")
+            .contentType("application/json")
+            .content(objectMapper.writeValueAsString(Map.of(
+                "carrierCode", fastShipQuote.path("carrierCode").asText(),
+                "serviceCode", fastShipQuote.path("serviceCode").asText(),
+                "quotedAmount", fastShipQuote.path("totalCharge").decimalValue()
+            ))))
+        .andExpect(status().isOk());
+
+    mockMvc.perform(post("/api/orders/{orderId}/create-shipment", "ZPY-ORD-10001"))
+        .andExpect(status().isOk());
+
+    String response = mockMvc.perform(get("/api/orders/{orderId}/events", "ZPY-ORD-10001")
+            .param("limit", "1")
+            .param("offset", "0"))
+        .andExpect(status().isOk())
+        .andExpect(jsonPath("$.limit").value(1))
+        .andExpect(jsonPath("$.offset").value(0))
+        .andExpect(jsonPath("$.events.length()").value(1))
+        .andReturn()
+        .getResponse()
+        .getContentAsString();
+
+    JsonNode body = objectMapper.readTree(response);
+    assertThat(body.path("totalEvents").asInt()).isGreaterThanOrEqualTo(1);
+  }
+
+  @Test
+  void returnsSystemOverviewMetrics() throws Exception {
+    mockMvc.perform(post("/api/orders")
+            .contentType("application/json")
+            .content(objectMapper.writeValueAsString(sampleOrder())))
+        .andExpect(status().isCreated());
+
+    mockMvc.perform(get("/api/system/overview"))
+        .andExpect(status().isOk())
+        .andExpect(jsonPath("$.orders").value(1))
+        .andExpect(jsonPath("$.automationEnabled").exists())
+        .andExpect(jsonPath("$.supportedCarriers.length()").value(3));
+  }
+
+  @Test
+  void returnsRecentOrderHistory() throws Exception {
+    mockMvc.perform(post("/api/orders")
+            .contentType("application/json")
+            .content(objectMapper.writeValueAsString(sampleOrder("MERCHANT-10001"))))
+        .andExpect(status().isCreated());
+
+    mockMvc.perform(post("/api/orders")
+            .contentType("application/json")
+            .content(objectMapper.writeValueAsString(sampleOrder("MERCHANT-10002"))))
+        .andExpect(status().isCreated());
+
+    mockMvc.perform(get("/api/orders/history").param("limit", "2"))
+        .andExpect(status().isOk())
+        .andExpect(jsonPath("$.orders.length()").value(2))
+        .andExpect(jsonPath("$.orders[0].merchantOrderId").value("MERCHANT-10002"))
+        .andExpect(jsonPath("$.orders[1].merchantOrderId").value("MERCHANT-10001"));
+  }
+
   private JsonNode createOrder() throws Exception {
     return objectMapper.readTree(mockMvc.perform(post("/api/orders")
             .contentType("application/json")
@@ -277,6 +372,10 @@ class ZippyControllerTest {
   }
 
   private Map<String, Object> sampleOrder() {
+    return sampleOrder("MERCHANT-10001");
+  }
+
+  private Map<String, Object> sampleOrder(String merchantOrderId) {
     Map<String, Object> customer = Map.of(
         "name", "Rahul Sharma",
         "phone", "9876543210",
@@ -301,7 +400,7 @@ class ZippyControllerTest {
         "heightCm", 10
     );
     Map<String, Object> order = new LinkedHashMap<>();
-    order.put("merchantOrderId", "MERCHANT-10001");
+    order.put("merchantOrderId", merchantOrderId);
     order.put("customer", customer);
     order.put("pickupAddress", pickupAddress);
     order.put("deliveryAddress", deliveryAddress);
