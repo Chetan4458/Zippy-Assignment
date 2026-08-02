@@ -1,0 +1,5 @@
+ALTER TABLE payments ADD COLUMN IF NOT EXISTS failure_code VARCHAR(64);
+ALTER TABLE payments ADD COLUMN IF NOT EXISTS failure_reason VARCHAR(255);
+ALTER TABLE payments ADD COLUMN IF NOT EXISTS refunded_amount DECIMAL(10,2) NOT NULL DEFAULT 0;
+
+CREATE INDEX IF NOT EXISTS idx_orders_status ON orders(order_status);

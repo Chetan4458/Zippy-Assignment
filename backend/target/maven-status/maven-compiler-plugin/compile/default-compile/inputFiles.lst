@@ -2,7 +2,10 @@ C:\zippy.ai assignment\backend\src\main\java\com\zippy\backend\config\AsyncConfi
 C:\zippy.ai assignment\backend\src\main\java\com\zippy\backend\config\WebConfig.java
 C:\zippy.ai assignment\backend\src\main\java\com\zippy\backend\controller\ZippyController.java
 C:\zippy.ai assignment\backend\src\main\java\com\zippy\backend\dto\CarrierSelectionRequest.java
+C:\zippy.ai assignment\backend\src\main\java\com\zippy\backend\dto\CreatePaymentIntentRequest.java
 C:\zippy.ai assignment\backend\src\main\java\com\zippy\backend\dto\OrderCreateRequest.java
+C:\zippy.ai assignment\backend\src\main\java\com\zippy\backend\dto\PaymentFailureRequest.java
+C:\zippy.ai assignment\backend\src\main\java\com\zippy\backend\dto\PaymentIntentResponse.java
 C:\zippy.ai assignment\backend\src\main\java\com\zippy\backend\exception\ApiException.java
 C:\zippy.ai assignment\backend\src\main\java\com\zippy\backend\exception\ApiExceptionHandler.java
 C:\zippy.ai assignment\backend\src\main\java\com\zippy\backend\service\ZippyService.java

@@ -3,8 +3,12 @@ package com.zippy.backend.controller;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.zippy.backend.dto.CarrierSelectionRequest;
 import com.zippy.backend.dto.OrderCreateRequest;
+import com.zippy.backend.dto.CreatePaymentIntentRequest;
+import com.zippy.backend.dto.PaymentIntentResponse;
+import com.zippy.backend.dto.PaymentFailureRequest;
 import com.zippy.backend.service.ZippyService;
 import jakarta.validation.Valid;
+import java.util.List;
 import java.util.Map;
 import org.springframework.http.HttpStatus;
 import org.springframework.http.ResponseEntity;
@@ -63,6 +67,11 @@ public class ZippyController {
     return zippyService.createShipment(orderId);
   }
 
+  @PostMapping("/api/orders/{orderId}/cancel")
+  public Map<String, Object> cancelOrder(@PathVariable String orderId) {
+    return zippyService.cancelOrder(orderId);
+  }
+
   @GetMapping("/api/orders/{orderId}/tracking")
   public Map<String, Object> getTracking(@PathVariable String orderId) {
     return zippyService.getTracking(orderId);
@@ -97,9 +106,27 @@ public class ZippyController {
     return zippyService.handleWebhook("RELIABLE", payload);
   }
 
+  @PostMapping("/api/webhooks/{carrier}")
+  public Map<String, Object> carrierWebhook(
+      @PathVariable String carrier,
+      @RequestBody JsonNode payload
+  ) {
+    return zippyService.handleWebhook(carrier, payload);
+  }
+
   @PostMapping("/api/mock-carriers/{orderId}/advance")
   public Map<String, Object> advanceCarrier(@PathVariable String orderId) {
     return zippyService.advanceMockCarrier(orderId);
+  }
+
+  @PostMapping("/api/mock-carriers/{orderId}/delivery-failed")
+  public Map<String, Object> mockDeliveryFailure(@PathVariable String orderId) {
+    return zippyService.mockDeliveryFailure(orderId);
+  }
+
+  @PostMapping("/api/mock-carriers/{orderId}/rto")
+  public Map<String, Object> mockRto(@PathVariable String orderId) {
+    return zippyService.mockRto(orderId);
   }
 
   @PostMapping("/api/dev/runtime-flags")
@@ -142,5 +169,64 @@ public class ZippyController {
   @PutMapping("/reliablecourier/orders")
   public Map<String, Object> reliableShipment(@RequestBody JsonNode payload) {
     return zippyService.mockReliableShipment(payload);
+  }
+
+  @GetMapping("/api/reports/summary")
+  public Map<String, Object> getReportsSummary() {
+    return zippyService.getReportsSummary();
+  }
+
+  @GetMapping("/api/reports/payments")
+  public Map<String, Object> getPaymentHistory(
+      @RequestParam(defaultValue = "10") int limit,
+      @RequestParam(defaultValue = "0") int offset
+  ) {
+    return zippyService.getPaymentHistory(limit, offset);
+  }
+
+  @PostMapping("/api/payments")
+  public ResponseEntity<PaymentIntentResponse> createPaymentIntent(
+      @Valid @RequestBody CreatePaymentIntentRequest request
+  ) {
+    PaymentIntentResponse response = zippyService.createPaymentIntent(request);
+    return ResponseEntity.status(HttpStatus.CREATED).body(response);
+  }
+
+  @GetMapping("/api/payments/{paymentId}")
+  public PaymentIntentResponse getPayment(@PathVariable String paymentId) {
+    return zippyService.getPayment(paymentId);
+  }
+
+  @PostMapping("/api/payments/{paymentId}/confirm")
+  public PaymentIntentResponse confirmPayment(@PathVariable String paymentId) {
+    return zippyService.confirmPayment(paymentId);
+  }
+
+  @PostMapping("/api/payments/{paymentId}/fail")
+  public PaymentIntentResponse failPayment(
+      @PathVariable String paymentId,
+      @RequestBody(required = false) PaymentFailureRequest request
+  ) {
+    return zippyService.failPayment(paymentId, request);
+  }
+
+  @PostMapping("/api/payments/{paymentId}/cancel")
+  public PaymentIntentResponse cancelPayment(@PathVariable String paymentId) {
+    return zippyService.cancelPayment(paymentId);
+  }
+
+  @PostMapping("/api/payments/{paymentId}/refund")
+  public PaymentIntentResponse refundPayment(@PathVariable String paymentId) {
+    return zippyService.refundPayment(paymentId);
+  }
+
+  @PostMapping("/api/payments/{paymentId}/collect")
+  public PaymentIntentResponse collectPayment(@PathVariable String paymentId) {
+    return zippyService.collectPayment(paymentId);
+  }
+
+  @GetMapping("/api/orders/{orderId}/payments")
+  public List<PaymentIntentResponse> getOrderPayments(@PathVariable String orderId) {
+    return zippyService.getPaymentsForOrder(orderId);
   }
 }

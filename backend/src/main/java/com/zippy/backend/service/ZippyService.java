@@ -4,7 +4,10 @@ import com.fasterxml.jackson.core.type.TypeReference;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.zippy.backend.dto.CarrierSelectionRequest;
+import com.zippy.backend.dto.CreatePaymentIntentRequest;
 import com.zippy.backend.dto.OrderCreateRequest;
+import com.zippy.backend.dto.PaymentIntentResponse;
+import com.zippy.backend.dto.PaymentFailureRequest;
 import com.zippy.backend.exception.ApiException;
 import java.math.BigDecimal;
 import java.math.RoundingMode;
@@ -12,6 +15,8 @@ import java.nio.charset.StandardCharsets;
 import java.sql.ResultSet;
 import java.sql.SQLException;
 import java.time.Instant;
+import java.time.LocalDateTime;
+import java.time.ZoneOffset;
 import java.time.temporal.ChronoUnit;
 import java.util.ArrayList;
 import java.util.Collections;
@@ -20,6 +25,7 @@ import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.Objects;
+import java.util.UUID;
 import java.security.MessageDigest;
 import java.security.NoSuchAlgorithmException;
 import java.util.concurrent.CompletableFuture;
@@ -48,6 +54,7 @@ public class ZippyService {
   private static final String STATUS_DELIVERED = "DELIVERED";
   private static final String STATUS_DELIVERY_FAILED = "DELIVERY_FAILED";
   private static final String STATUS_RTO = "RTO";
+  private static final String STATUS_CANCELLED = "CANCELLED";
   private static final long DEFAULT_CARRIER_TIMEOUT_MS = 1500L;
   private static final long DEFAULT_AUTOMATION_DELAY_MS = 1500L;
 
@@ -130,6 +137,9 @@ public class ZippyService {
     }, keyHolder);
 
     OrderRow order = findOrderByZippyId(orderId);
+    if ("COD".equalsIgnoreCase(order.paymentType())) {
+      createCodPayment(order, now);
+    }
     List<ShippingQuote> quotes = getCarrierQuotes(order);
     insertQuotes(order, quotes, now);
     Map<String, Object> response = getOrder(orderId);
@@ -192,11 +202,97 @@ public class ZippyService {
     overview.put("quotes", countRows("shipping_quotes"));
     overview.put("shipments", countRows("shipments"));
     overview.put("events", countRows("shipment_events"));
+    overview.put("payments", countRows("payments"));
     overview.put("automationEnabled", automationEnabled);
     overview.put("carrierTimeoutMs", DEFAULT_CARRIER_TIMEOUT_MS);
     overview.put("runtimeFlags", getRuntimeFlags());
     overview.put("supportedCarriers", List.of("FASTSHIP", "QUICKEXPRESS", "RELIABLE"));
     return overview;
+  }
+
+  public Map<String, Object> getReportsSummary() {
+    Map<String, Object> summary = new LinkedHashMap<>();
+
+    summary.put("totalOrders", countRows("orders"));
+    summary.put("totalShipments", countRows("shipments"));
+    summary.put("totalPayments", countRows("payments"));
+
+    summary.put("ordersByStatus", jdbcTemplate.query("""
+        SELECT order_status AS label, COUNT(*) AS count
+        FROM orders
+        GROUP BY order_status
+        ORDER BY count DESC
+        """, (rs, rowNum) -> Map.of(
+        "label", rs.getString("label"),
+        "count", rs.getLong("count")
+    )));
+
+    summary.put("ordersByPaymentType", jdbcTemplate.query("""
+        SELECT payment_type AS label, COUNT(*) AS count
+        FROM orders
+        GROUP BY payment_type
+        ORDER BY count DESC
+        """, (rs, rowNum) -> Map.of(
+        "label", rs.getString("label"),
+        "count", rs.getLong("count")
+    )));
+
+    BigDecimal shippingRevenue = jdbcTemplate.queryForObject(
+        "SELECT COALESCE(SUM(quoted_amount), 0) FROM shipments", BigDecimal.class);
+    summary.put("totalShippingRevenue", defaultDecimal(shippingRevenue));
+
+    BigDecimal codValue = jdbcTemplate.queryForObject(
+        "SELECT COALESCE(SUM(cod_amount), 0) FROM orders WHERE payment_type = 'COD'", BigDecimal.class);
+    summary.put("totalCodValue", defaultDecimal(codValue));
+
+    summary.put("carrierBreakdown", jdbcTemplate.query("""
+        SELECT carrier_code AS carrier, COUNT(*) AS shipments, COALESCE(SUM(quoted_amount), 0) AS revenue
+        FROM shipments
+        GROUP BY carrier_code
+        ORDER BY shipments DESC
+        """, (rs, rowNum) -> {
+      Map<String, Object> row = new LinkedHashMap<>();
+      row.put("carrier", rs.getString("carrier"));
+      row.put("shipments", rs.getLong("shipments"));
+      row.put("revenue", defaultDecimal(rs.getBigDecimal("revenue")));
+      return row;
+    }));
+
+    summary.put("paymentsByStatus", jdbcTemplate.query("""
+        SELECT status AS label, COUNT(*) AS count, COALESCE(SUM(amount), 0) AS totalAmount
+        FROM payments
+        GROUP BY status
+        ORDER BY count DESC
+        """, (rs, rowNum) -> {
+      Map<String, Object> row = new LinkedHashMap<>();
+      row.put("label", rs.getString("label"));
+      row.put("count", rs.getLong("count"));
+      row.put("totalAmount", defaultDecimal(rs.getBigDecimal("totalAmount")));
+      return row;
+    }));
+
+    BigDecimal succeededAmount = jdbcTemplate.queryForObject(
+        "SELECT COALESCE(SUM(amount), 0) FROM payments WHERE status = 'SUCCEEDED'", BigDecimal.class);
+    summary.put("totalPaymentCollected", defaultDecimal(succeededAmount));
+
+    return summary;
+  }
+
+  public Map<String, Object> getPaymentHistory(int limit, int offset) {
+    int safeLimit = Math.max(1, Math.min(limit, 50));
+    int safeOffset = Math.max(0, offset);
+    List<PaymentRow> payments = jdbcTemplate.query("""
+        SELECT * FROM payments
+        ORDER BY id DESC
+        LIMIT ? OFFSET ?
+        """, paymentRowMapper, safeLimit, safeOffset);
+
+    Map<String, Object> response = new LinkedHashMap<>();
+    response.put("limit", safeLimit);
+    response.put("offset", safeOffset);
+    response.put("totalPayments", countRows("payments"));
+    response.put("payments", payments.stream().map(this::paymentToMap).toList());
+    return response;
   }
 
   public Map<String, Object> getRates(String orderId, String sortBy) {
@@ -218,6 +314,9 @@ public class ZippyService {
     String now = now();
     String selectedQuoteJson = toJson(quoteToMap(quote));
     ShipmentRow existingShipment = findShipment(order.id());
+    if (existingShipment != null && !STATUS_CARRIER_SELECTED.equals(existingShipment.currentStatus())) {
+      throw new ApiException(409, "Carrier cannot be changed after shipment creation");
+    }
     if (existingShipment == null) {
       jdbcTemplate.update("""
           INSERT INTO shipments (
@@ -259,6 +358,9 @@ public class ZippyService {
     ShipmentRow shipment = findShipment(order.id());
     if (shipment == null) {
       throw new ApiException(409, "Carrier not selected");
+    }
+    if (!STATUS_CARRIER_SELECTED.equals(shipment.currentStatus())) {
+      throw new ApiException(409, "Shipment has already been created or is not ready for creation");
     }
 
     ShippingQuote quote = parseQuote(shipment.selectedQuoteJson());
@@ -306,8 +408,47 @@ public class ZippyService {
     );
   }
 
+  @Transactional
+  public Map<String, Object> cancelOrder(String orderId) {
+    OrderRow order = findOrderByZippyOrderIdForUpdate(orderId);
+    ShipmentRow shipment = findShipment(order.id());
+    String currentStatus = shipment == null ? order.orderStatus() : shipment.currentStatus();
+    if (!isCancellableStatus(currentStatus)) {
+      throw new ApiException(409, "Order cannot be cancelled from status " + currentStatus);
+    }
+
+    String timestamp = now();
+    if (shipment != null) {
+      jdbcTemplate.update("UPDATE shipments SET current_status = ?, updated_at = ? WHERE id = ?",
+          STATUS_CANCELLED, timestamp, shipment.id());
+      jdbcTemplate.update("""
+          INSERT INTO shipment_events (
+            shipment_id, carrier_event_id, carrier_status, normalized_status, description,
+            location, event_time, raw_event_payload, received_at
+          ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+          """,
+          shipment.id(), "ZIPPY-CANCEL-" + UUID.randomUUID(), "CANCELLED", STATUS_CANCELLED,
+          "Order cancelled by operations", null, timestamp, "{\"source\":\"zippy\"}", timestamp);
+    }
+    jdbcTemplate.update("UPDATE orders SET order_status = ?, updated_at = ? WHERE id = ?",
+        STATUS_CANCELLED, timestamp, order.id());
+    settlePaymentsForTerminalOrder(order.id(), "CANCELLED");
+    return getOrder(orderId);
+  }
+
+  private boolean isCancellableStatus(String status) {
+    return STATUS_ORDER_CREATED.equals(status)
+        || STATUS_CARRIER_SELECTED.equals(status)
+        || STATUS_SHIPMENT_CREATED.equals(status);
+  }
+
   public Map<String, Object> handleWebhook(String carrierCode, JsonNode payload) {
-    CarrierEvent event = mapWebhook(carrierCode, payload);
+    String normalizedCarrier = carrierCode == null ? "" : carrierCode.trim().toUpperCase();
+    if (!List.of("FASTSHIP", "QUICKEXPRESS", "RELIABLE").contains(normalizedCarrier)) {
+      throw new ApiException(404, "Unsupported carrier webhook: " + carrierCode);
+    }
+
+    CarrierEvent event = mapWebhook(normalizedCarrier, payload);
     ShipmentRow shipment = findShipmentByTracking(event.trackingKey(), event.trackingField());
     if (shipment == null) {
       throw new ApiException(404, "Unknown tracking number");
@@ -323,6 +464,22 @@ public class ZippyService {
     }
     JsonNode payload = buildWebhookPayload(shipment, nextStatus);
     return handleWebhook(shipment.carrierCode(), payload);
+  }
+
+  public Map<String, Object> mockDeliveryFailure(String orderId) {
+    ShipmentRow shipment = requireShipment(orderId);
+    if (!STATUS_OUT_FOR_DELIVERY.equals(shipment.currentStatus())) {
+      throw new ApiException(409, "Delivery failure can only be simulated from OUT_FOR_DELIVERY");
+    }
+    return handleWebhook(shipment.carrierCode(), buildWebhookPayload(shipment, STATUS_DELIVERY_FAILED));
+  }
+
+  public Map<String, Object> mockRto(String orderId) {
+    ShipmentRow shipment = requireShipment(orderId);
+    if (!STATUS_DELIVERY_FAILED.equals(shipment.currentStatus())) {
+      throw new ApiException(409, "RTO can only be simulated after DELIVERY_FAILED");
+    }
+    return handleWebhook(shipment.carrierCode(), buildWebhookPayload(shipment, STATUS_RTO));
   }
 
   public Map<String, Object> mockFastshipRate(JsonNode payload) {
@@ -540,6 +697,7 @@ public class ZippyService {
       case STATUS_PICKED_UP -> STATUS_IN_TRANSIT;
       case STATUS_IN_TRANSIT -> STATUS_OUT_FOR_DELIVERY;
       case STATUS_OUT_FOR_DELIVERY -> STATUS_DELIVERED;
+      case STATUS_DELIVERY_FAILED -> STATUS_IN_TRANSIT;
       default -> null;
     };
   }
@@ -656,6 +814,10 @@ public class ZippyService {
   }
 
   private Map<String, Object> recordCarrierEvent(ShipmentRow shipment, JsonNode payload, String receivedAt, CarrierEvent event) {
+    if (event.normalizedStatus() == null) {
+      throw new ApiException(422, "Unsupported status from " + shipment.carrierCode());
+    }
+
     ShipmentRow currentShipment = findShipment(shipment.orderId());
     if (!allowedTransition(currentShipment.currentStatus(), event.normalizedStatus())) {
       if (!Objects.equals(currentShipment.currentStatus(), event.normalizedStatus())) {
@@ -673,14 +835,57 @@ public class ZippyService {
           currentShipment.id(), event.carrierEventId(), event.carrierStatus(), event.normalizedStatus(), event.description(),
           event.location(), event.eventTime(), toJson(payload), receivedAt);
     } catch (DuplicateKeyException duplicate) {
-        return Map.of("duplicate", true);
+        return Map.of(
+            "duplicate", true,
+            "status", currentShipment.currentStatus(),
+            "carrierEventId", event.carrierEventId()
+        );
     }
 
     jdbcTemplate.update("UPDATE shipments SET current_status = ?, updated_at = ? WHERE id = ?",
         event.normalizedStatus(), receivedAt, currentShipment.id());
     jdbcTemplate.update("UPDATE orders SET order_status = ?, updated_at = ? WHERE id = ?",
         event.normalizedStatus(), receivedAt, currentShipment.orderId());
-    return Map.of("duplicate", false, "status", event.normalizedStatus());
+    settlePaymentsForTerminalOrder(currentShipment.orderId(), event.normalizedStatus());
+    return Map.of(
+        "duplicate", false,
+        "status", event.normalizedStatus(),
+        "carrierEventId", event.carrierEventId()
+    );
+  }
+
+  private void settlePaymentsForTerminalOrder(long orderId, String shipmentStatus) {
+    if (STATUS_DELIVERY_FAILED.equals(shipmentStatus)) {
+      return;
+    }
+
+    if (STATUS_RTO.equals(shipmentStatus)) {
+      jdbcTemplate.update("""
+          UPDATE payments
+          SET status = CASE
+                WHEN payment_method = 'COD' AND status = 'AWAITING_COLLECTION' THEN 'VOIDED'
+                WHEN payment_method = 'PREPAID' AND status = 'PENDING' THEN 'CANCELLED'
+                WHEN payment_method = 'PREPAID' AND status = 'SUCCEEDED' THEN 'REFUND_PENDING'
+                ELSE status
+              END,
+              updated_at = ?
+          WHERE order_id = ?
+            AND status IN ('AWAITING_COLLECTION', 'PENDING', 'SUCCEEDED')
+          """, now(), orderId);
+    } else if (STATUS_CANCELLED.equals(shipmentStatus)) {
+      jdbcTemplate.update("""
+          UPDATE payments
+          SET status = CASE
+                WHEN payment_method = 'COD' AND status = 'AWAITING_COLLECTION' THEN 'VOIDED'
+                WHEN payment_method = 'PREPAID' AND status = 'PENDING' THEN 'CANCELLED'
+                WHEN payment_method = 'PREPAID' AND status = 'SUCCEEDED' THEN 'REFUND_PENDING'
+                ELSE status
+              END,
+              updated_at = ?
+          WHERE order_id = ?
+            AND status IN ('AWAITING_COLLECTION', 'PENDING', 'SUCCEEDED')
+          """, now(), orderId);
+    }
   }
 
   private Map<String, Object> shipmentToMap(ShipmentRow shipment) {
@@ -1054,7 +1259,15 @@ public class ZippyService {
   }
 
   private OrderRow findOrderByZippyOrderIdForUpdate(String orderId) {
-    return findOrderByZippyId(orderId);
+    try {
+      return jdbcTemplate.queryForObject(
+          "SELECT * FROM orders WHERE zippy_order_id = ? FOR UPDATE",
+          orderRowMapper,
+          orderId
+      );
+    } catch (Exception exception) {
+      throw new ApiException(404, "Order not found");
+    }
   }
 
   private OrderRow findOrderByZippyOrderId(String orderId) {
@@ -1313,13 +1526,14 @@ public class ZippyService {
       return true;
     }
     return switch (currentStatus) {
-      case STATUS_ORDER_CREATED -> STATUS_CARRIER_SELECTED.equals(nextStatus) || STATUS_SHIPMENT_CREATED.equals(nextStatus);
-      case STATUS_CARRIER_SELECTED -> STATUS_SHIPMENT_CREATED.equals(nextStatus);
-      case STATUS_SHIPMENT_CREATED -> STATUS_PICKED_UP.equals(nextStatus);
+      case STATUS_ORDER_CREATED -> STATUS_CARRIER_SELECTED.equals(nextStatus) || STATUS_SHIPMENT_CREATED.equals(nextStatus) || STATUS_CANCELLED.equals(nextStatus);
+      case STATUS_CARRIER_SELECTED -> STATUS_SHIPMENT_CREATED.equals(nextStatus) || STATUS_CANCELLED.equals(nextStatus);
+      case STATUS_SHIPMENT_CREATED -> STATUS_PICKED_UP.equals(nextStatus) || STATUS_CANCELLED.equals(nextStatus);
       case STATUS_PICKED_UP -> STATUS_IN_TRANSIT.equals(nextStatus);
       case STATUS_IN_TRANSIT -> STATUS_OUT_FOR_DELIVERY.equals(nextStatus);
       case STATUS_OUT_FOR_DELIVERY -> STATUS_DELIVERED.equals(nextStatus) || STATUS_DELIVERY_FAILED.equals(nextStatus);
-      case STATUS_DELIVERED, STATUS_DELIVERY_FAILED, STATUS_RTO -> false;
+      case STATUS_DELIVERY_FAILED -> STATUS_IN_TRANSIT.equals(nextStatus) || STATUS_RTO.equals(nextStatus);
+      case STATUS_DELIVERED, STATUS_RTO, STATUS_CANCELLED -> false;
       default -> false;
     };
   }
@@ -1412,4 +1626,250 @@ public class ZippyService {
       String responseJson,
       String createdAt
   ) {}
+
+  private record PaymentRow(
+      long id,
+      String paymentId,
+      long orderId,
+      String zippyOrderId,
+      BigDecimal amount,
+      String currency,
+      String status,
+      String paymentMethod,
+      String collectionStage,
+      String failureCode,
+      String failureReason,
+      BigDecimal refundedAmount,
+      String createdAt,
+      String updatedAt
+  ) {}
+
+  private final RowMapper<PaymentRow> paymentRowMapper = (rs, rowNum) -> new PaymentRow(
+      rs.getLong("id"),
+      rs.getString("payment_id"),
+      rs.getLong("order_id"),
+      rs.getString("zippy_order_id"),
+      defaultDecimal(rs.getBigDecimal("amount")),
+      rs.getString("currency"),
+      rs.getString("status"),
+      rs.getString("payment_method"),
+      rs.getString("collection_stage"),
+      rs.getString("failure_code"),
+      rs.getString("failure_reason"),
+      defaultDecimal(rs.getBigDecimal("refunded_amount")),
+      rs.getString("created_at"),
+      rs.getString("updated_at")
+  );
+
+  @Transactional
+  public PaymentIntentResponse createPaymentIntent(CreatePaymentIntentRequest request) {
+    OrderRow order = findOrderByZippyId(request.getOrderId());
+    if (!"PREPAID".equalsIgnoreCase(order.paymentType())) {
+      throw new ApiException(409, "Payment intents are only available for prepaid orders");
+    }
+
+    ShipmentRow shipment = findShipment(order.id());
+    if (shipment == null) {
+      throw new ApiException(409, "Select a carrier before creating a payment");
+    }
+
+    String currency = request.getCurrency().trim().toUpperCase();
+    if (!List.of("INR", "USD").contains(currency)) {
+      throw new ApiException(422, "Unsupported currency: " + currency);
+    }
+
+    BigDecimal amount = request.getAmount().setScale(2, RoundingMode.HALF_UP);
+    if (!"INR".equals(currency) || amount.compareTo(shipment.quotedAmount()) != 0) {
+      throw new ApiException(422, "Payment amount must match the selected shipment charge in INR");
+    }
+
+    PaymentRow existingPending = findPendingPaymentForOrder(order.id());
+    if (existingPending != null) {
+      if (existingPending.amount().compareTo(amount) != 0 || !currency.equals(existingPending.currency())) {
+        throw new ApiException(409, "A payment intent already exists for this order");
+      }
+      return toPaymentIntentResponse(existingPending);
+    }
+
+    String paymentId = "PAY-" + UUID.randomUUID().toString().substring(0, 8).toUpperCase();
+    String timestamp = now();
+    jdbcTemplate.update("""
+        INSERT INTO payments (
+          payment_id, order_id, zippy_order_id, amount, currency, status,
+          payment_method, collection_stage, created_at, updated_at
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        """,
+        paymentId, order.id(), order.zippyOrderId(), amount, currency, "PENDING", "PREPAID", "CHECKOUT", timestamp, timestamp);
+
+    return toPaymentIntentResponse(requirePayment(paymentId));
+  }
+
+  @Transactional
+  public PaymentIntentResponse confirmPayment(String paymentId) {
+    PaymentRow payment = requirePayment(paymentId);
+    if (!"PREPAID".equals(payment.paymentMethod())) {
+      throw new ApiException(409, "Only prepaid payments can be confirmed");
+    }
+    if ("SUCCEEDED".equals(payment.status())) {
+      return toPaymentIntentResponse(payment);
+    }
+    if (!"PENDING".equals(payment.status())) {
+      throw new ApiException(409, "Payment cannot be confirmed from status " + payment.status());
+    }
+
+    String timestamp = now();
+    jdbcTemplate.update("UPDATE payments SET status = ?, updated_at = ? WHERE payment_id = ?",
+        "SUCCEEDED", timestamp, paymentId);
+    return toPaymentIntentResponse(requirePayment(paymentId));
+  }
+
+  @Transactional
+  public PaymentIntentResponse failPayment(String paymentId, PaymentFailureRequest request) {
+    PaymentRow payment = requirePayment(paymentId);
+    if (!"PREPAID".equals(payment.paymentMethod()) || !"PENDING".equals(payment.status())) {
+      throw new ApiException(409, "Only pending prepaid payments can be failed");
+    }
+    String timestamp = now();
+    String code = request == null || request.code() == null || request.code().isBlank() ? "PAYMENT_DECLINED" : request.code().trim();
+    String reason = request == null || request.reason() == null || request.reason().isBlank() ? "Payment was declined" : request.reason().trim();
+    jdbcTemplate.update("UPDATE payments SET status = ?, failure_code = ?, failure_reason = ?, updated_at = ? WHERE payment_id = ?",
+        "FAILED", code, reason, timestamp, paymentId);
+    return toPaymentIntentResponse(requirePayment(paymentId));
+  }
+
+  @Transactional
+  public PaymentIntentResponse cancelPayment(String paymentId) {
+    PaymentRow payment = requirePayment(paymentId);
+    if (!"PENDING".equals(payment.status())) {
+      throw new ApiException(409, "Only pending payments can be cancelled");
+    }
+    jdbcTemplate.update("UPDATE payments SET status = ?, updated_at = ? WHERE payment_id = ?",
+        "CANCELLED", now(), paymentId);
+    return toPaymentIntentResponse(requirePayment(paymentId));
+  }
+
+  @Transactional
+  public PaymentIntentResponse refundPayment(String paymentId) {
+    PaymentRow payment = requirePayment(paymentId);
+    if (!"PREPAID".equals(payment.paymentMethod())
+        || !("SUCCEEDED".equals(payment.status()) || "REFUND_PENDING".equals(payment.status()))) {
+      throw new ApiException(409, "Only succeeded or refund-pending prepaid payments can be refunded");
+    }
+    jdbcTemplate.update("UPDATE payments SET status = ?, refunded_amount = amount, updated_at = ? WHERE payment_id = ?",
+        "REFUNDED", now(), paymentId);
+    return toPaymentIntentResponse(requirePayment(paymentId));
+  }
+
+  @Transactional
+  public PaymentIntentResponse collectPayment(String paymentId) {
+    PaymentRow payment = requirePayment(paymentId);
+    if (!"COD".equals(payment.paymentMethod())) {
+      throw new ApiException(409, "Only COD payments can be collected at delivery");
+    }
+    if ("SUCCEEDED".equals(payment.status())) {
+      return toPaymentIntentResponse(payment);
+    }
+    if (!"AWAITING_COLLECTION".equals(payment.status())) {
+      throw new ApiException(409, "COD payment cannot be collected from status " + payment.status());
+    }
+
+    OrderRow order = findOrderByZippyId(payment.zippyOrderId());
+    ShipmentRow shipment = findShipment(order.id());
+    if (shipment == null || !STATUS_DELIVERED.equals(shipment.currentStatus())) {
+      throw new ApiException(409, "COD can only be collected after delivery is confirmed");
+    }
+
+    String timestamp = now();
+    jdbcTemplate.update("UPDATE payments SET status = ?, collection_stage = ?, updated_at = ? WHERE payment_id = ?",
+        "SUCCEEDED", "DELIVERY", timestamp, paymentId);
+    return toPaymentIntentResponse(requirePayment(paymentId));
+  }
+
+  public PaymentIntentResponse getPayment(String paymentId) {
+    return toPaymentIntentResponse(requirePayment(paymentId));
+  }
+
+  public List<PaymentIntentResponse> getPaymentsForOrder(String orderId) {
+    OrderRow order = findOrderByZippyId(orderId);
+    return jdbcTemplate.query(
+        "SELECT * FROM payments WHERE order_id = ? ORDER BY id DESC",
+        paymentRowMapper,
+        order.id()
+    ).stream().map(this::toPaymentIntentResponse).toList();
+  }
+
+  private PaymentRow findPendingPaymentForOrder(long orderId) {
+    List<PaymentRow> payments = jdbcTemplate.query(
+        "SELECT * FROM payments WHERE order_id = ? AND status = 'PENDING' ORDER BY id DESC LIMIT 1",
+        paymentRowMapper,
+        orderId
+    );
+    return payments.isEmpty() ? null : payments.getFirst();
+  }
+
+  private void createCodPayment(OrderRow order, String timestamp) {
+    Long existing = jdbcTemplate.queryForObject(
+        "SELECT COUNT(*) FROM payments WHERE order_id = ? AND payment_method = 'COD'",
+        Long.class,
+        order.id()
+    );
+    if (existing != null && existing > 0) {
+      return;
+    }
+
+    String paymentId = "COD-" + UUID.randomUUID().toString().substring(0, 8).toUpperCase();
+    jdbcTemplate.update("""
+        INSERT INTO payments (
+          payment_id, order_id, zippy_order_id, amount, currency, status,
+          payment_method, collection_stage, created_at, updated_at
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        """,
+        paymentId, order.id(), order.zippyOrderId(), defaultDecimal(order.codAmount()), "INR",
+        "AWAITING_COLLECTION", "COD", "DELIVERY", timestamp, timestamp);
+  }
+
+  private PaymentRow requirePayment(String paymentId) {
+    try {
+      return jdbcTemplate.queryForObject(
+          "SELECT * FROM payments WHERE payment_id = ?",
+          paymentRowMapper,
+          paymentId
+      );
+    } catch (Exception exception) {
+      throw new ApiException(404, "Payment not found");
+    }
+  }
+
+  private PaymentIntentResponse toPaymentIntentResponse(PaymentRow payment) {
+    PaymentIntentResponse response = new PaymentIntentResponse();
+    response.setPaymentId(payment.paymentId());
+    response.setOrderId(payment.zippyOrderId());
+    response.setAmount(payment.amount());
+    response.setCurrency(payment.currency());
+    response.setStatus(payment.status());
+    response.setPaymentMethod(payment.paymentMethod());
+    response.setCollectionStage(payment.collectionStage());
+    response.setFailureCode(payment.failureCode());
+    response.setFailureReason(payment.failureReason());
+    response.setRefundedAmount(payment.refundedAmount());
+    response.setCreatedAt(LocalDateTime.ofInstant(Instant.parse(payment.createdAt()), ZoneOffset.UTC));
+    return response;
+  }
+
+  private Map<String, Object> paymentToMap(PaymentRow payment) {
+    Map<String, Object> response = new LinkedHashMap<>();
+    response.put("paymentId", payment.paymentId());
+    response.put("orderId", payment.zippyOrderId());
+    response.put("amount", payment.amount());
+    response.put("currency", payment.currency());
+    response.put("status", payment.status());
+    response.put("paymentMethod", payment.paymentMethod());
+    response.put("collectionStage", payment.collectionStage());
+    response.put("failureCode", payment.failureCode());
+    response.put("failureReason", payment.failureReason());
+    response.put("refundedAmount", payment.refundedAmount());
+    response.put("createdAt", payment.createdAt());
+    response.put("updatedAt", payment.updatedAt());
+    return response;
+  }
 }

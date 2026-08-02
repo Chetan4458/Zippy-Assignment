@@ -118,14 +118,44 @@ function formatDateTime(value) {
   });
 }
 
+function downloadPaymentsCsv(payments) {
+  const headers = ['Payment ID', 'Order ID', 'Amount', 'Currency', 'Status', 'Created at'];
+  const rows = payments.map((payment) => [
+    payment.paymentId,
+    payment.orderId,
+    payment.amount,
+    payment.currency,
+    payment.status,
+    payment.createdAt,
+  ]);
+  const csv = [headers, ...rows]
+    .map((row) => row.map((value) => `"${String(value ?? '').replaceAll('"', '""')}"`).join(','))
+    .join('\n');
+  const blob = new Blob([csv], { type: 'text/csv;charset=utf-8' });
+  const url = URL.createObjectURL(blob);
+  const anchor = document.createElement('a');
+  anchor.href = url;
+  anchor.download = `zippy-payments-${new Date().toISOString().slice(0, 10)}.csv`;
+  anchor.click();
+  URL.revokeObjectURL(url);
+}
+
 function shellValue(source, key) {
   return source[key] ?? '';
 }
 
 function statusTone(status) {
   if (status === 'DELIVERED') return 'success';
-  if (status === 'DELIVERY_FAILED' || status === 'RTO') return 'danger';
+  if (['DELIVERY_FAILED', 'RTO', 'CANCELLED', 'FAILED', 'VOIDED'].includes(status)) return 'danger';
+  if (['PENDING', 'AWAITING_COLLECTION', 'REFUND_PENDING'].includes(status)) return 'warning';
   return 'neutral';
+}
+
+function readableStatus(status) {
+  return String(status || '')
+    .replaceAll('_', ' ')
+    .toLowerCase()
+    .replace(/(^|\\s)\\S/g, (letter) => letter.toUpperCase());
 }
 
 function currentStatusFor(order) {
@@ -142,6 +172,10 @@ function workflowStage(order) {
   return 0;
 }
 
+function isCancellableStatus(status) {
+  return ['ORDER_CREATED', 'CARRIER_SELECTED', 'SHIPMENT_CREATED'].includes(status);
+}
+
 function MetricCard({ label, value, tone }) {
   return (
     <article className={`stat-card ${tone}`}>
@@ -156,16 +190,11 @@ function StatusPill({ status }) {
 }
 
 function historyActionLabel(item) {
-  const status = item.selectedShipment?.currentStatus || item.orderStatus || 'ORDER_CREATED';
-  if (status === 'ORDER_CREATED' || status === 'CARRIER_SELECTED') {
-    return item.selectedShipment ? 'Update carrier' : 'Select carrier';
-  }
   return 'View details';
 }
 
 function historyActionVariant(item) {
-  const status = item.selectedShipment?.currentStatus || item.orderStatus || 'ORDER_CREATED';
-  return status === 'ORDER_CREATED' || status === 'CARRIER_SELECTED' ? 'primary' : 'ghost';
+  return 'ghost';
 }
 
 function SectionHeader({ eyebrow, title, subtitle, action }) {
@@ -225,6 +254,15 @@ function App() {
   const [creatingShipment, setCreatingShipment] = useState(false);
   const [systemOverview, setSystemOverview] = useState(null);
   const [orderHistory, setOrderHistory] = useState([]);
+  const [reportsSummary, setReportsSummary] = useState(null);
+  const [paymentHistory, setPaymentHistory] = useState([]);
+  const [orderPayments, setOrderPayments] = useState([]);
+  const [processingPayment, setProcessingPayment] = useState(false);
+  const [loadingHistory, setLoadingHistory] = useState(false);
+  const [loadingTracking, setLoadingTracking] = useState(false);
+  const [loadingReports, setLoadingReports] = useState(false);
+  const [reportsError, setReportsError] = useState('');
+  const [reportRefreshKey, setReportRefreshKey] = useState(0);
   const createFormRef = useRef(null);
 
   useEffect(() => {
@@ -232,9 +270,10 @@ function App() {
     let timer = null;
 
     async function refreshTracking() {
-      if (!order?.zippy_order_id || screen !== 'details') {
+      if (!order?.zippy_order_id || !['details', 'webhooks', 'payments'].includes(screen)) {
         return;
       }
+      setLoadingTracking(true);
       try {
         const payload = await api(`/api/orders/${order.zippy_order_id}/tracking`);
         if (!cancelled) {
@@ -242,6 +281,10 @@ function App() {
         }
       } catch {
         // Best effort polling.
+      } finally {
+        if (!cancelled) {
+          setLoadingTracking(false);
+        }
       }
     }
 
@@ -258,6 +301,7 @@ function App() {
 
   useEffect(() => {
     let cancelled = false;
+    let timer = null;
 
     async function refreshSystemOverview() {
       try {
@@ -283,6 +327,7 @@ function App() {
     let cancelled = false;
 
     async function refreshOrderHistory() {
+      setLoadingHistory(true);
       try {
         const payload = await api('/api/orders/history?limit=6');
         if (!cancelled) {
@@ -290,6 +335,10 @@ function App() {
         }
       } catch {
         // Best effort history panel.
+      } finally {
+        if (!cancelled) {
+          setLoadingHistory(false);
+        }
       }
     }
 
@@ -301,6 +350,76 @@ function App() {
       clearInterval(interval);
     };
   }, []);
+
+  useEffect(() => {
+    let cancelled = false;
+
+    async function refreshReports() {
+      if (screen !== 'reports' && screen !== 'payments') {
+        return;
+      }
+      setLoadingReports(true);
+      try {
+        const [summary, payments] = await Promise.all([
+          api('/api/reports/summary'),
+          api('/api/reports/payments?limit=10'),
+        ]);
+        if (!cancelled) {
+          setReportsSummary(summary);
+          setPaymentHistory(payments.payments || []);
+          setReportsError('');
+        }
+      } catch (error) {
+        // Best effort reporting panel.
+        if (!cancelled) {
+          setReportsError(error.message);
+        }
+      } finally {
+        if (!cancelled) {
+          setLoadingReports(false);
+        }
+      }
+    }
+
+    refreshReports();
+    const interval = setInterval(refreshReports, 15000);
+
+    return () => {
+      cancelled = true;
+      clearInterval(interval);
+    };
+  }, [screen, reportRefreshKey]);
+
+  useEffect(() => {
+    let cancelled = false;
+
+    let timer = null;
+
+    async function refreshOrderPayments() {
+      if (!order?.zippy_order_id || !['details', 'rates', 'payments'].includes(screen)) {
+        return;
+      }
+      try {
+        const payments = await api(`/api/orders/${order.zippy_order_id}/payments`);
+        if (!cancelled) {
+          setOrderPayments(payments || []);
+        }
+      } catch {
+        // Best effort payment panel.
+      }
+    }
+
+    refreshOrderPayments();
+    if (order?.zippy_order_id && screen === 'payments') {
+      timer = setInterval(refreshOrderPayments, 4000);
+    }
+    return () => {
+      cancelled = true;
+      if (timer) {
+        clearInterval(timer);
+      }
+    };
+  }, [order?.zippy_order_id, screen, tracking?.zippy_order_id]);
 
   useEffect(() => {
     let cancelled = false;
@@ -407,6 +526,123 @@ function App() {
     }
   }
 
+  async function handleCreatePaymentIntent() {
+    if (!order?.zippy_order_id || !selectedCarrier) {
+      return;
+    }
+    setProcessingPayment(true);
+    setErrorMessage('');
+    try {
+      const payment = await api('/api/payments', {
+        method: 'POST',
+        body: JSON.stringify({
+          orderId: order.zippy_order_id,
+          amount: selectedCarrier.totalCharge,
+          currency: 'INR',
+        }),
+      });
+      setOrderPayments((current) => [payment, ...current.filter((item) => item.paymentId !== payment.paymentId)]);
+      setStatusMessage(`Payment intent ${payment.paymentId} created`);
+    } catch (error) {
+      setErrorMessage(error.message);
+    } finally {
+      setProcessingPayment(false);
+    }
+  }
+
+  async function handleConfirmPayment(paymentId) {
+    setProcessingPayment(true);
+    setErrorMessage('');
+    try {
+      const payment = await api(`/api/payments/${paymentId}/confirm`, { method: 'POST' });
+      setOrderPayments((current) =>
+        current.map((item) => (item.paymentId === payment.paymentId ? payment : item)),
+      );
+      setStatusMessage(`Payment ${payment.paymentId} confirmed`);
+    } catch (error) {
+      setErrorMessage(error.message);
+    } finally {
+      setProcessingPayment(false);
+    }
+  }
+
+  async function handleCollectPayment(paymentId) {
+    setProcessingPayment(true);
+    setErrorMessage('');
+    try {
+      const payment = await api(`/api/payments/${paymentId}/collect`, { method: 'POST' });
+      setOrderPayments((current) =>
+        current.map((item) => (item.paymentId === payment.paymentId ? payment : item)),
+      );
+      setStatusMessage(`COD payment ${payment.paymentId} collected`);
+    } catch (error) {
+      setErrorMessage(error.message);
+    } finally {
+      setProcessingPayment(false);
+    }
+  }
+
+  async function handleFailPayment(paymentId) {
+    setProcessingPayment(true);
+    setErrorMessage('');
+    try {
+      const payment = await api(`/api/payments/${paymentId}/fail`, {
+        method: 'POST',
+        body: JSON.stringify({ code: 'PAYMENT_DECLINED', reason: 'Simulated gateway decline' }),
+      });
+      setOrderPayments((current) => current.map((item) => (item.paymentId === payment.paymentId ? payment : item)));
+      setStatusMessage(`Payment ${payment.paymentId} marked failed`);
+    } catch (error) {
+      setErrorMessage(error.message);
+    } finally {
+      setProcessingPayment(false);
+    }
+  }
+
+  async function handleCancelPayment(paymentId) {
+    setProcessingPayment(true);
+    setErrorMessage('');
+    try {
+      const payment = await api(`/api/payments/${paymentId}/cancel`, { method: 'POST' });
+      setOrderPayments((current) => current.map((item) => (item.paymentId === payment.paymentId ? payment : item)));
+      setStatusMessage(`Payment ${payment.paymentId} cancelled`);
+    } catch (error) {
+      setErrorMessage(error.message);
+    } finally {
+      setProcessingPayment(false);
+    }
+  }
+
+  async function handleRefundPayment(paymentId) {
+    setProcessingPayment(true);
+    setErrorMessage('');
+    try {
+      const payment = await api(`/api/payments/${paymentId}/refund`, { method: 'POST' });
+      setOrderPayments((current) => current.map((item) => (item.paymentId === payment.paymentId ? payment : item)));
+      setStatusMessage(`Payment ${payment.paymentId} refunded`);
+    } catch (error) {
+      setErrorMessage(error.message);
+    } finally {
+      setProcessingPayment(false);
+    }
+  }
+
+  async function handleCancelOrder() {
+    if (!order?.zippy_order_id) {
+      return;
+    }
+    setErrorMessage('');
+    try {
+      const payload = await api(`/api/orders/${order.zippy_order_id}/cancel`, { method: 'POST' });
+      setOrder(payload);
+      setTracking(payload);
+      setStatusMessage(`Order ${payload.zippy_order_id} cancelled`);
+      startTransition(() => setScreen('details'));
+    } catch (error) {
+      setErrorMessage(error.message);
+    }
+  }
+
   async function handleSelectCarrier(option) {
     if (!order?.zippy_order_id) {
       return;
@@ -425,6 +661,7 @@ function App() {
           current
             ? {
                 ...current,
+                order_status: 'CARRIER_SELECTED',
                 selectedShipment: {
                   ...current.selectedShipment,
                   ...payload.selectedShipment,
@@ -445,6 +682,7 @@ function App() {
       return;
     }
     setCreatingShipment(true);
+    setErrorMessage('');
     try {
       await api(`/api/orders/${order.zippy_order_id}/create-shipment`, {
         method: 'POST',
@@ -464,12 +702,16 @@ function App() {
     if (!order?.zippy_order_id) {
       return;
     }
+    setLoadingTracking(true);
+    setErrorMessage('');
     try {
       await api(`/api/mock-carriers/${order.zippy_order_id}/advance`, { method: 'POST' });
       const payload = await api(`/api/orders/${order.zippy_order_id}/tracking`);
       setTracking(payload);
     } catch (error) {
       setErrorMessage(error.message);
+    } finally {
+      setLoadingTracking(false);
     }
   }
 
@@ -477,11 +719,15 @@ function App() {
     if (!order?.zippy_order_id) {
       return;
     }
+    setLoadingTracking(true);
+    setErrorMessage('');
     try {
       const payload = await api(`/api/orders/${order.zippy_order_id}/tracking`);
       setTracking(payload);
     } catch (error) {
       setErrorMessage(error.message);
+    } finally {
+      setLoadingTracking(false);
     }
   }
 
@@ -554,6 +800,15 @@ function App() {
   const liveOrder = tracking || order;
   const currentStage = workflowStage(liveOrder);
   const currentStatus = currentStatusFor(liveOrder);
+  const isPrepaidOrder = (liveOrder?.payment_type || liveOrder?.paymentType || '').toUpperCase() === 'PREPAID';
+  const pendingPayment = orderPayments.find((payment) => payment.status === 'PENDING');
+  const succeededPayment = orderPayments.find((payment) => payment.status === 'SUCCEEDED');
+  const failedPayment = orderPayments.find((payment) => payment.status === 'FAILED');
+  const cancelledPayment = orderPayments.find((payment) => payment.status === 'CANCELLED');
+  const refundPendingPayment = orderPayments.find((payment) => payment.status === 'REFUND_PENDING');
+  const refundedPayment = orderPayments.find((payment) => payment.status === 'REFUNDED');
+  const codPayment = orderPayments.find((payment) => payment.paymentMethod === 'COD');
+  const isDelivered = currentStatus === 'DELIVERED';
   const metrics = [
     { label: 'Quotes', value: String(rates.length || order?.shippingOptions?.length || 0), tone: 'accent' },
     { label: 'Current status', value: currentStatus.replaceAll('_', ' '), tone: statusTone(currentStatus) },
@@ -578,6 +833,25 @@ function App() {
             Create orders, compare carrier quotes, and monitor normalized shipment events in a workspace designed to feel
             ready for clients, not just demos.
           </p>
+
+          <nav className="sidebar-nav" aria-label="Primary navigation">
+            <p className="sidebar-nav-label">Workspace</p>
+            <button type="button" className={screen === 'create' ? 'active' : ''} onClick={handleStartNewOrder}>
+              <span>＋</span> Create order
+            </button>
+            <button type="button" className={screen === 'details' ? 'active' : ''} onClick={() => setScreen('details')} disabled={!order}>
+              <span>□</span> Order details
+            </button>
+            <button type="button" className={screen === 'payments' ? 'active' : ''} onClick={() => setScreen('payments')}>
+              <span>◈</span> Payments
+            </button>
+            <button type="button" className={screen === 'reports' ? 'active' : ''} onClick={() => setScreen('reports')}>
+              <span>▥</span> Reports
+            </button>
+            <button type="button" className={screen === 'webhooks' ? 'active' : ''} onClick={() => setScreen('webhooks')}>
+              <span>⌁</span> Webhook monitor
+            </button>
+          </nav>
 
           <div style={{ height: '1.25rem' }} />
 
@@ -615,6 +889,10 @@ function App() {
                   <span>Events</span>
                 </div>
                 <div>
+                  <strong>{systemOverview.payments ?? 0}</strong>
+                  <span>Payments</span>
+                </div>
+                <div>
                   <strong>{systemOverview.carrierTimeoutMs ?? 0}ms</strong>
                   <span>Carrier timeout</span>
                 </div>
@@ -638,30 +916,20 @@ function App() {
 
       <section className="panel">
         <header className="topbar">
-          <div className="segmented">
-            <button
-              type="button"
-              className={screen === 'create' ? 'active' : ''}
-              onClick={handleStartNewOrder}
-            >
-              Create Order
-            </button>
-            <button
-              type="button"
-              className={screen === 'rates' ? 'active' : ''}
-              onClick={() => setScreen('rates')}
-              disabled={!order}
-            >
-              Courier Selection
-            </button>
-            <button
-              type="button"
-              className={screen === 'details' ? 'active' : ''}
-              onClick={() => setScreen('details')}
-              disabled={!order}
-            >
-              Order Details
-            </button>
+          <div className="topbar-title">
+            <span>Operations workspace</span>
+            <strong>{screen === 'create' ? 'Order intake' : screen === 'details' ? 'Shipment tracking' : screen === 'payments' ? 'Payment operations' : screen === 'reports' ? 'Performance reports' : 'Webhook monitor'}</strong>
+          </div>
+          <nav className="topbar-nav" aria-label="Primary navigation">
+            <button type="button" className={screen === 'create' ? 'active' : ''} onClick={handleStartNewOrder}>Create order</button>
+            <button type="button" className={screen === 'details' ? 'active' : ''} onClick={() => setScreen('details')} disabled={!order}>Order details</button>
+            <button type="button" className={screen === 'reports' ? 'active' : ''} onClick={() => setScreen('reports')}>Reports</button>
+            <button type="button" className={screen === 'payments' ? 'active' : ''} onClick={() => setScreen('payments')}>Payments</button>
+            <button type="button" className={screen === 'webhooks' ? 'active' : ''} onClick={() => setScreen('webhooks')}>Webhooks</button>
+          </nav>
+          <div className="topbar-actions">
+            {order ? <span className="topbar-order">{order.zippy_order_id}</span> : <span className="topbar-order">No active order</span>}
+            <button type="button" className="primary topbar-new-order" onClick={handleStartNewOrder}>New order</button>
           </div>
         </header>
 
@@ -717,6 +985,8 @@ function App() {
                 </article>
               ))}
             </div>
+          ) : loadingHistory ? (
+            <div className="empty">Loading recent orders...</div>
           ) : (
             <div className="empty">No orders created yet.</div>
           )}
@@ -887,10 +1157,48 @@ function App() {
                   <p className="subtle">
                     {money(selectedCarrier.totalCharge)} - {estimateLabel(selectedCarrier)}
                   </p>
+                  {isPrepaidOrder && !succeededPayment ? (
+                    <p className="subtle">
+                      Prepaid order: {pendingPayment ? `Confirm payment ${pendingPayment.paymentId}` : 'Create a payment intent before shipment'}
+                    </p>
+                  ) : null}
                 </div>
-                <button type="button" className="primary" disabled={creatingShipment} onClick={handleCreateShipment}>
-                  {creatingShipment ? 'Creating...' : 'Create Shipment'}
-                </button>
+                <div className="selection-actions">
+                  {isPrepaidOrder && !succeededPayment ? (
+                    pendingPayment ? (
+                      <button
+                        type="button"
+                        className="primary"
+                        disabled={processingPayment}
+                        onClick={() => handleConfirmPayment(pendingPayment.paymentId)}
+                      >
+                        {processingPayment ? 'Processing...' : 'Confirm Payment'}
+                      </button>
+                    ) : (
+                      <button
+                        type="button"
+                        className="primary"
+                        disabled={processingPayment}
+                        onClick={handleCreatePaymentIntent}
+                      >
+                        {processingPayment ? 'Processing...' : 'Create Payment'}
+                      </button>
+                    )
+                  ) : null}
+                  <button
+                    type="button"
+                    className="primary"
+                    disabled={creatingShipment || (isPrepaidOrder && !succeededPayment)}
+                    title={isPrepaidOrder && !succeededPayment ? 'Confirm payment before creating the shipment' : undefined}
+                    onClick={handleCreateShipment}
+                  >
+                    {creatingShipment
+                      ? 'Creating...'
+                      : isPrepaidOrder && !succeededPayment
+                        ? 'Confirm payment to continue'
+                        : 'Create Shipment'}
+                  </button>
+                </div>
               </div>
             ) : (
               <div className="empty subtle-note">Pick a carrier to continue to shipment creation.</div>
@@ -904,7 +1212,16 @@ function App() {
               eyebrow="Step 3"
               title="Order Details and Tracking"
               subtitle="Shipment metadata, carrier selection, and webhook-driven history."
-              action={<StatusPill status={currentStatus} />}
+              action={
+                <div className="selection-actions">
+                  <StatusPill status={currentStatus} />
+                  {isCancellableStatus(currentStatus) ? (
+                    <button type="button" className="ghost" onClick={handleCancelOrder}>
+                      Cancel order
+                    </button>
+                  ) : null}
+                </div>
+              }
             />
 
             {tracking ? (
@@ -942,7 +1259,45 @@ function App() {
                     <span>Current status</span>
                     <strong>{currentStatusFor(tracking).replaceAll('_', ' ')}</strong>
                   </div>
+                  <div>
+                    <span>Payment type</span>
+                    <strong>{tracking.payment_type || tracking.paymentType || '-'}</strong>
+                  </div>
                 </div>
+
+                {orderPayments.length ? (
+                  <div className="history-wrap">
+                    <div className="history-head">
+                      <h3>Payments</h3>
+                      <span>{orderPayments.length} records</span>
+                    </div>
+                    <ul className="history">
+                      {orderPayments.map((payment) => (
+                        <li key={payment.paymentId}>
+                          <div>
+                            <strong>{payment.paymentId}</strong>
+                            <span>
+                              {money(payment.amount)} {payment.currency} · {readableStatus(payment.status)}
+                            </span>
+                          </div>
+                          <div className="history-actions">
+                            <small>{formatDateTime(payment.createdAt)}</small>
+                            {payment.paymentMethod === 'COD' && payment.status === 'AWAITING_COLLECTION' ? (
+                              <button
+                                type="button"
+                                className="ghost compact-button"
+                                disabled={currentStatusFor(tracking) !== 'DELIVERED' || processingPayment}
+                                onClick={() => handleCollectPayment(payment.paymentId)}
+                              >
+                                {currentStatusFor(tracking) === 'DELIVERED' ? 'Record collection' : 'Awaiting delivery'}
+                              </button>
+                            ) : null}
+                          </div>
+                        </li>
+                      ))}
+                    </ul>
+                  </div>
+                ) : null}
 
                 <div className="history-wrap">
                   <div className="history-head">
@@ -978,6 +1333,397 @@ function App() {
               </>
             ) : (
               <div className="empty">Create a shipment to see tracking details.</div>
+            )}
+          </section>
+        ) : null}
+
+        {screen === 'payments' ? (
+          <section className="card">
+            <SectionHeader
+              eyebrow="Collections"
+              title="Payments"
+              subtitle="Create and confirm prepaid payments from the active order, or review recent payment activity."
+              action={
+                <button
+                  type="button"
+                  className="ghost"
+                  disabled={loadingReports}
+                  onClick={() => setReportRefreshKey((value) => value + 1)}
+                >
+                  {loadingReports ? 'Refreshing...' : 'Refresh payments'}
+                </button>
+              }
+            />
+
+            {order ? (
+              <div className="selection-bar">
+                <div>
+                  <p className="section-label">Active order</p>
+                  <strong>{order.zippy_order_id}</strong>
+                  <p className="subtle">
+                    {selectedCarrier
+                      ? `${selectedCarrier.carrierName} · ${money(selectedCarrier.totalCharge)}`
+                      : 'Select a carrier before creating a payment'}
+                  </p>
+                </div>
+                <div className="selection-actions">
+                  {!isPrepaidOrder ? (
+                    <div>
+                      <StatusPill status={codPayment?.status || 'AWAITING_COLLECTION'} />
+                      <p className="subtle">
+                        {codPayment ? `${money(codPayment.amount)} due on delivery.` : 'COD payment is being prepared.'}
+                      </p>
+                      {codPayment?.status === 'AWAITING_COLLECTION' ? (
+                        <button
+                          type="button"
+                          className="primary"
+                          disabled={!isDelivered || processingPayment}
+                          onClick={() => handleCollectPayment(codPayment.paymentId)}
+                          title={!isDelivered ? 'Collection is enabled after delivery is confirmed' : undefined}
+                        >
+                          {processingPayment ? 'Recording...' : isDelivered ? 'Record COD collection' : 'Awaiting delivery'}
+                        </button>
+                      ) : null}
+                    </div>
+                  ) : !selectedCarrier ? (
+                    <button type="button" className="ghost" onClick={() => setScreen('rates')}>
+                      Select carrier
+                    </button>
+                  ) : pendingPayment ? (
+                    <div className="selection-actions">
+                      <button
+                        type="button"
+                        className="primary"
+                        disabled={processingPayment}
+                        onClick={() => handleConfirmPayment(pendingPayment.paymentId)}
+                      >
+                        {processingPayment ? 'Processing...' : 'Confirm payment'}
+                      </button>
+                      <button type="button" className="ghost" disabled={processingPayment} onClick={() => handleFailPayment(pendingPayment.paymentId)}>
+                        Simulate decline
+                      </button>
+                      <button type="button" className="ghost" disabled={processingPayment} onClick={() => handleCancelPayment(pendingPayment.paymentId)}>
+                        Cancel checkout
+                      </button>
+                    </div>
+                  ) : succeededPayment ? (
+                    <div className="selection-actions">
+                      <StatusPill status="SUCCEEDED" />
+                      <button type="button" className="ghost" disabled={processingPayment} onClick={() => handleRefundPayment(succeededPayment.paymentId)}>
+                        Refund payment
+                      </button>
+                    </div>
+                  ) : refundPendingPayment ? (
+                    <div className="selection-actions">
+                      <StatusPill status="REFUND_PENDING" />
+                      <button type="button" className="ghost" disabled={processingPayment} onClick={() => handleRefundPayment(refundPendingPayment.paymentId)}>
+                        Complete refund
+                      </button>
+                    </div>
+                  ) : refundedPayment ? (
+                    <StatusPill status="REFUNDED" />
+                  ) : failedPayment ? (
+                    <div>
+                      <StatusPill status="FAILED" />
+                      <p className="subtle">{failedPayment.failureReason || 'Payment was declined. Retry checkout.'}</p>
+                    </div>
+                  ) : cancelledPayment ? (
+                    <StatusPill status="CANCELLED" />
+                  ) : (
+                    <button
+                      type="button"
+                      className="primary"
+                      disabled={processingPayment}
+                      onClick={handleCreatePaymentIntent}
+                    >
+                      {processingPayment ? 'Processing...' : 'Create payment'}
+                    </button>
+                  )}
+                </div>
+              </div>
+            ) : (
+              <div className="empty">Create an order to start a payment.</div>
+            )}
+
+            {order ? (
+              <div className="payment-journey">
+                <div className="journey-heading">
+                  <div>
+                    <p className="section-label">Collection workflow</p>
+                    <h3>{isPrepaidOrder ? 'Prepaid checkout' : 'COD collection'}</h3>
+                  </div>
+                  <span>{isPrepaidOrder ? readableStatus(succeededPayment ? 'SUCCEEDED' : pendingPayment ? 'PENDING' : 'NOT_STARTED') : readableStatus(codPayment?.status || 'PENDING')}</span>
+                </div>
+                <ol className="payment-steps">
+                  <li className="complete"><span>1</span><div><strong>Order accepted</strong><small>Payment obligation created</small></div></li>
+                  <li className={isPrepaidOrder ? (succeededPayment ? 'complete' : 'active') : (isDelivered ? 'complete' : 'active')}>
+                    <span>2</span>
+                    <div><strong>{isPrepaidOrder ? 'Payment authorized' : 'Delivery confirmed'}</strong><small>{isPrepaidOrder ? (succeededPayment ? 'Funds captured successfully' : 'Complete checkout before shipment') : (isDelivered ? 'Carrier confirmed delivery' : 'Awaiting delivery webhook')}</small></div>
+                  </li>
+                  <li className={!isPrepaidOrder && codPayment?.status === 'SUCCEEDED' ? 'complete' : !isPrepaidOrder && isDelivered ? 'active' : ''}>
+                    <span>3</span>
+                    <div><strong>{isPrepaidOrder ? 'Ready for shipment' : 'COD collected'}</strong><small>{isPrepaidOrder ? 'Shipment can be created' : (codPayment?.status === 'SUCCEEDED' ? 'Collection recorded' : 'Available after delivery confirmation')}</small></div>
+                  </li>
+                </ol>
+                {!isPrepaidOrder && !isDelivered ? <button type="button" className="ghost" onClick={() => setScreen('webhooks')}>Open webhook monitor</button> : null}
+              </div>
+            ) : null}
+
+            <div className="history-wrap">
+              <div className="history-head">
+                <h3>Recent payment activity</h3>
+                <span>{paymentHistory.length} shown</span>
+              </div>
+              {paymentHistory.length ? (
+                <ul className="history">
+                  {paymentHistory.map((payment) => (
+                    <li key={payment.paymentId}>
+                      <div>
+                        <strong>{payment.paymentId}</strong>
+                        <span>{payment.orderId} · {money(payment.amount)} · {readableStatus(payment.status)}</span>
+                      </div>
+                      <small>{formatDateTime(payment.createdAt)}</small>
+                    </li>
+                  ))}
+                </ul>
+              ) : (
+                <div className="empty">No payment records yet.</div>
+              )}
+            </div>
+          </section>
+        ) : null}
+
+        {screen === 'webhooks' ? (
+          <section className="card">
+            <SectionHeader
+              eyebrow="Carrier events"
+              title="Webhooks"
+              subtitle="Normalized carrier callbacks, duplicate protection, and shipment status history."
+              action={
+                <button
+                  type="button"
+                  className="ghost"
+                  disabled={!order || loadingTracking}
+                  onClick={handleRefreshTracking}
+                >
+                  {loadingTracking ? 'Refreshing...' : 'Refresh events'}
+                </button>
+              }
+            />
+
+            <div className="report-panels">
+              {[
+                ['FastShip', '/api/webhooks/fastship', 'shipment_id + event_code'],
+                ['QuickExpress', '/api/webhooks/quickexpress', 'awb + event.type'],
+                ['Reliable Courier', '/api/webhooks/reliable', 'trackingCode + statusId'],
+              ].map(([carrier, endpoint, payload]) => (
+                <article className="report-panel" key={carrier}>
+                  <h3>{carrier}</h3>
+                  <p className="subtle">POST {endpoint}</p>
+                  <span className="webhook-schema">{payload}</span>
+                </article>
+              ))}
+            </div>
+
+            <div className="history-wrap">
+              <div className="history-head">
+                <h3>Active order events</h3>
+                <span>{history.length} events</span>
+              </div>
+              {order && history.length ? (
+                <ul className="history">
+                  {history.map((event) => (
+                    <li key={event.carrierEventId}>
+                      <div>
+                        <strong>{event.status}</strong>
+                        <span>{event.description}</span>
+                      </div>
+                      <small>{formatDateTime(event.eventTime)}</small>
+                    </li>
+                  ))}
+                </ul>
+              ) : (
+                <div className="empty">Create a shipment to see webhook events here.</div>
+              )}
+              {order ? (
+                <div className="actions webhook-actions">
+                  <button type="button" className="primary" onClick={handleAdvanceStatus} disabled={loadingTracking}>
+                    {loadingTracking ? 'Receiving callback...' : 'Simulate next carrier callback'}
+                  </button>
+                  {currentStatus === 'OUT_FOR_DELIVERY' ? (
+                    <button type="button" className="ghost" onClick={async () => {
+                      try {
+                        await api(`/api/mock-carriers/${order.zippy_order_id}/delivery-failed`, { method: 'POST' });
+                        await handleRefreshTracking();
+                      } catch (error) {
+                        setErrorMessage(error.message);
+                      }
+                    }} disabled={loadingTracking}>
+                      Simulate delivery failure
+                    </button>
+                  ) : null}
+                  {currentStatus === 'DELIVERY_FAILED' ? (
+                    <button type="button" className="ghost" onClick={async () => {
+                      try {
+                        await api(`/api/mock-carriers/${order.zippy_order_id}/rto`, { method: 'POST' });
+                        await handleRefreshTracking();
+                      } catch (error) {
+                        setErrorMessage(error.message);
+                      }
+                    }} disabled={loadingTracking}>
+                      Simulate RTO
+                    </button>
+                  ) : null}
+                  <span className="helper">Useful for testing normalized statuses and duplicate-safe event handling.</span>
+                </div>
+              ) : null}
+            </div>
+          </section>
+        ) : null}
+
+        {screen === 'reports' ? (
+          <section className="card">
+            <SectionHeader
+              eyebrow="Analytics"
+              title="Payment and Operations Reports"
+              subtitle="Aggregated order, shipping, and payment metrics across the platform."
+              action={
+                <div className="selection-actions">
+                  <button
+                    type="button"
+                    className="ghost"
+                    disabled={loadingReports}
+                    onClick={() => setReportRefreshKey((value) => value + 1)}
+                  >
+                    {loadingReports ? 'Refreshing...' : 'Refresh report'}
+                  </button>
+                  <button
+                    type="button"
+                    className="ghost"
+                    disabled={!paymentHistory.length}
+                    onClick={() => downloadPaymentsCsv(paymentHistory)}
+                  >
+                    Export payments CSV
+                  </button>
+                </div>
+              }
+            />
+
+            {loadingReports && !reportsSummary ? (
+              <div className="empty">Loading operational report...</div>
+            ) : reportsError && !reportsSummary ? (
+              <div className="empty error-state">
+                <span>{reportsError}</span>
+                <button type="button" className="ghost" onClick={() => setReportRefreshKey((value) => value + 1)}>
+                  Retry
+                </button>
+              </div>
+            ) : reportsSummary ? (
+              <>
+                <div className="report-grid">
+                  <MetricCard label="Total orders" value={String(reportsSummary.totalOrders ?? 0)} tone="accent" />
+                  <MetricCard label="Shipments" value={String(reportsSummary.totalShipments ?? 0)} tone="neutral" />
+                  <MetricCard
+                    label="Shipping revenue"
+                    value={money(reportsSummary.totalShippingRevenue)}
+                    tone="success"
+                  />
+                  <MetricCard label="COD value" value={money(reportsSummary.totalCodValue)} tone="warning" />
+                  <MetricCard
+                    label="Payments collected"
+                    value={money(reportsSummary.totalPaymentCollected)}
+                    tone="success"
+                  />
+                  <MetricCard label="Payment records" value={String(reportsSummary.totalPayments ?? 0)} tone="accent" />
+                </div>
+
+                <div className="report-panels">
+                  <article className="report-panel">
+                    <h3>Orders by status</h3>
+                    <ul className="report-list">
+                      {(reportsSummary.ordersByStatus || []).map((row) => (
+                        <li key={row.label}>
+                          <span>{row.label.replaceAll('_', ' ')}</span>
+                          <strong>{row.count}</strong>
+                        </li>
+                      ))}
+                    </ul>
+                  </article>
+
+                  <article className="report-panel">
+                    <h3>Orders by payment type</h3>
+                    <ul className="report-list">
+                      {(reportsSummary.ordersByPaymentType || []).map((row) => (
+                        <li key={row.label}>
+                          <span>{row.label}</span>
+                          <strong>{row.count}</strong>
+                        </li>
+                      ))}
+                    </ul>
+                  </article>
+
+                  <article className="report-panel">
+                    <h3>Carrier breakdown</h3>
+                    <ul className="report-list">
+                      {(reportsSummary.carrierBreakdown || []).map((row) => (
+                        <li key={row.carrier}>
+                          <span>{row.carrier}</span>
+                          <strong>
+                            {row.shipments} · {money(row.revenue)}
+                          </strong>
+                        </li>
+                      ))}
+                    </ul>
+                  </article>
+
+                  <article className="report-panel">
+                    <h3>Payments by status</h3>
+                    <ul className="report-list">
+                      {(reportsSummary.paymentsByStatus || []).length ? (
+                        reportsSummary.paymentsByStatus.map((row) => (
+                          <li key={row.label}>
+                            <span>{row.label}</span>
+                            <strong>
+                              {row.count} · {money(row.totalAmount)}
+                            </strong>
+                          </li>
+                        ))
+                      ) : (
+                        <li>
+                          <span>No payments yet</span>
+                          <strong>0</strong>
+                        </li>
+                      )}
+                    </ul>
+                  </article>
+                </div>
+
+                <div className="history-wrap">
+                  <div className="history-head">
+                    <h3>Recent payments</h3>
+                    <span>{paymentHistory.length} shown</span>
+                  </div>
+                  {paymentHistory.length ? (
+                    <ul className="history">
+                      {paymentHistory.map((payment) => (
+                        <li key={payment.paymentId}>
+                          <div>
+                            <strong>{payment.paymentId}</strong>
+                            <span>
+                              {payment.orderId} · {money(payment.amount)} · {payment.status}
+                            </span>
+                          </div>
+                          <small>{formatDateTime(payment.createdAt)}</small>
+                        </li>
+                      ))}
+                    </ul>
+                  ) : (
+                    <div className="empty">No payment records yet.</div>
+                  )}
+                </div>
+              </>
+            ) : (
+              <div className="empty">Loading reports...</div>
             )}
           </section>
         ) : null}

@@ -345,6 +345,88 @@ button.selected {
   color: #15803d;
 }
 
+.stat-card.warning strong {
+  color: #b45309;
+}
+
+.report-grid {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 0.85rem;
+}
+
+.report-panels {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 0.85rem;
+  margin-top: 1rem;
+}
+
+.report-panel {
+  border: 1px solid rgba(148, 163, 184, 0.18);
+  border-radius: 20px;
+  padding: 1rem;
+  background: #ffffff;
+}
+
+.report-panel h3 {
+  margin: 0 0 0.8rem;
+  font-size: 1rem;
+}
+
+.webhook-schema {
+  display: inline-flex;
+  margin-top: 0.35rem;
+  padding: 0.4rem 0.55rem;
+  border-radius: 8px;
+  background: #f1f5f9;
+  color: #475569;
+  font: 0.78rem/1.2 ui-monospace, SFMono-Regular, Consolas, monospace;
+}
+
+.history-actions {
+  display: grid;
+  justify-items: end;
+  gap: 0.35rem;
+}
+
+.compact-button {
+  padding: 0.45rem 0.65rem;
+  font-size: 0.76rem;
+}
+
+.report-list {
+  list-style: none;
+  padding: 0;
+  margin: 0;
+  display: grid;
+  gap: 0.55rem;
+}
+
+.report-list li {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 1rem;
+  padding-bottom: 0.55rem;
+  border-bottom: 1px solid rgba(148, 163, 184, 0.14);
+}
+
+.report-list li:last-child {
+  padding-bottom: 0;
+  border-bottom: 0;
+}
+
+.report-list span {
+  color: var(--muted);
+}
+
+.selection-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.6rem;
+}
+
 .stat-card.neutral strong {
   color: #334155;
 }
@@ -872,6 +954,17 @@ tbody tr:hover {
   background: rgba(248, 250, 252, 0.95);
 }
 
+.error-state {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 0.8rem;
+  flex-wrap: wrap;
+  color: #991b1b;
+  background: rgba(254, 242, 242, 0.96);
+  border-color: rgba(220, 38, 38, 0.18);
+}
+
 .subtle-note {
   margin-top: 0.8rem;
 }
@@ -907,6 +1000,12 @@ tbody tr:hover {
   color: #991b1b;
   background: rgba(220, 38, 38, 0.1);
   border-color: rgba(220, 38, 38, 0.18);
+}
+
+.status-pill.warning {
+  color: #92400e;
+  background: rgba(245, 158, 11, 0.12);
+  border-color: rgba(245, 158, 11, 0.2);
 }
 
 .status-pill.neutral {
@@ -1029,7 +1128,9 @@ tbody tr:hover {
   .grid,
   .detail-grid,
   .stat-grid,
-  .rate-grid {
+  .rate-grid,
+  .report-grid,
+  .report-panels {
     grid-template-columns: 1fr;
   }
 
@@ -1073,6 +1174,621 @@ tbody tr:hover {
     width: 100%;
     justify-self: stretch;
     min-width: 0;
+  }
+}
+
+/* Production console layout */
+body {
+  background: #f4f6fa;
+}
+
+.shell {
+  grid-template-columns: 264px minmax(0, 1fr);
+  gap: 0;
+  max-width: 1800px;
+  padding: 0;
+  background: #f4f6fa;
+}
+
+.hero {
+  position: sticky;
+  top: 0;
+  height: 100dvh;
+  max-height: 100dvh;
+  border: 0;
+  border-radius: 0;
+  padding: 1.5rem 1.1rem;
+  background: #101a2b;
+  box-shadow: 8px 0 28px rgba(15, 23, 42, 0.08);
+  color: #e2e8f0;
+  overflow-y: auto;
+}
+
+.hero::after {
+  width: 220px;
+  height: 220px;
+  right: -90px;
+  bottom: 4%;
+  background: radial-gradient(circle, rgba(37, 99, 235, 0.22), transparent 68%);
+}
+
+.brand-row {
+  align-items: center;
+  padding: 0.5rem 0.55rem 1.5rem;
+  border-bottom: 1px solid rgba(148, 163, 184, 0.14);
+}
+
+.brand-mark {
+  width: 2.65rem;
+  height: 2.65rem;
+  border-radius: 12px;
+  font-size: 1.15rem;
+  box-shadow: none;
+}
+
+.eyebrow {
+  margin: 0;
+  color: #7dd3fc;
+  font-size: 0.7rem;
+  letter-spacing: 0.12em;
+}
+
+.hero h1 {
+  max-width: none;
+  margin-top: 0.2rem;
+  color: #f8fafc;
+  font-size: 1.05rem;
+  line-height: 1.2;
+  letter-spacing: -0.02em;
+}
+
+.hero-copy {
+  max-width: none;
+  padding: 0 0.55rem;
+  color: #94a3b8;
+  font-size: 0.82rem;
+  line-height: 1.55;
+}
+
+.hero .stat-grid {
+  grid-template-columns: 1fr;
+  gap: 0.4rem;
+  padding: 0 0.2rem;
+}
+
+.hero .stat-card,
+.hero .system-card,
+.hero .workflow-card {
+  border-color: rgba(148, 163, 184, 0.14);
+  border-radius: 12px;
+  background: rgba(255, 255, 255, 0.055);
+  box-shadow: none;
+}
+
+.hero .stat-card {
+  min-height: 0;
+  padding: 0.7rem 0.8rem;
+  flex-direction: row;
+  align-items: center;
+}
+
+.hero .stat-card span,
+.hero .system-stats span,
+.hero .system-foot span,
+.hero .workflow-header span,
+.hero .workflow-header small {
+  color: #94a3b8;
+}
+
+.hero .stat-card strong {
+  font-size: 0.82rem;
+  color: #f8fafc;
+  text-align: right;
+}
+
+.hero .system-card {
+  padding: 0.8rem;
+}
+
+.hero .system-head h3,
+.hero .system-stats strong,
+.hero .workflow li strong {
+  color: #f8fafc;
+}
+
+.hero .system-stats {
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 0.4rem;
+}
+
+.hero .system-stats div {
+  padding: 0.55rem;
+  border-color: rgba(148, 163, 184, 0.12);
+  border-radius: 9px;
+  background: rgba(2, 6, 23, 0.2);
+}
+
+.hero .workflow-card {
+  padding: 0.85rem;
+}
+
+.hero .workflow {
+  gap: 0.55rem;
+  margin-top: 0.75rem;
+}
+
+.hero-footnote {
+  display: none;
+}
+
+.panel {
+  min-width: 0;
+  padding: 0 2.25rem 3rem;
+  border: 0;
+  border-radius: 0;
+  background: #f4f6fa;
+  box-shadow: none;
+}
+
+.topbar {
+  top: 0;
+  z-index: 10;
+  margin: 0 -2.25rem 1.5rem;
+  padding: 1rem 2.25rem;
+  border-bottom: 1px solid #e2e8f0;
+  background: rgba(244, 246, 250, 0.94);
+}
+
+.segmented {
+  width: 100%;
+  justify-content: flex-start;
+  gap: 0.15rem;
+  padding: 0;
+  border: 0;
+  border-radius: 0;
+  background: transparent;
+  box-shadow: none;
+}
+
+.segmented button {
+  padding: 0.65rem 0.8rem;
+  border-radius: 8px;
+  color: #64748b;
+  font-size: 0.82rem;
+}
+
+.segmented button.active {
+  color: #1d4ed8;
+  background: #e8efff;
+  box-shadow: none;
+}
+
+.workspace-banner {
+  padding: 1rem 1.1rem;
+  border-radius: 12px;
+  box-shadow: none;
+  background: #ffffff;
+}
+
+.workspace-copy h2 {
+  font-size: 1.05rem;
+}
+
+.workspace-copy .subtle {
+  margin-top: 0.25rem;
+  font-size: 0.82rem;
+}
+
+.workspace-tags span {
+  padding: 0.38rem 0.6rem;
+  font-size: 0.72rem;
+}
+
+.history-card,
+.card {
+  border-radius: 12px;
+  padding: 1.15rem;
+  box-shadow: 0 1px 2px rgba(15, 23, 42, 0.04);
+}
+
+.history-card {
+  margin-bottom: 0.9rem;
+}
+
+.card-head {
+  margin-bottom: 0.85rem;
+  padding-bottom: 0.75rem;
+}
+
+.card h2 {
+  font-size: 1.2rem;
+}
+
+.order-history-item,
+.rate-card,
+.report-panel,
+.detail-grid div,
+.history li {
+  border-radius: 10px;
+  box-shadow: none;
+}
+
+@media (max-width: 1180px) {
+  .shell {
+    grid-template-columns: 220px minmax(0, 1fr);
+  }
+
+  .panel {
+    padding-left: 1.25rem;
+    padding-right: 1.25rem;
+  }
+
+  .topbar {
+    margin-left: -1.25rem;
+    margin-right: -1.25rem;
+    padding-left: 1.25rem;
+    padding-right: 1.25rem;
+  }
+}
+
+@media (max-width: 780px) {
+  .shell {
+    display: block;
+  }
+
+  .hero {
+    position: relative;
+    width: 100%;
+    height: auto;
+    max-height: none;
+    padding: 0.85rem;
+  }
+
+  .hero-copy,
+  .hero .system-card,
+  .hero .workflow-card,
+  .hero .stat-grid {
+    display: none;
+  }
+
+  .brand-row {
+    border-bottom: 0;
+    padding-bottom: 0.5rem;
+  }
+
+  .panel {
+    padding: 0 0.75rem 2rem;
+  }
+
+  .topbar {
+    margin: 0 -0.75rem 1rem;
+    padding: 0.65rem 0.75rem;
+    overflow: hidden;
+  }
+
+  .segmented {
+    width: 100%;
+    flex-wrap: wrap;
+  }
+
+  .segmented button {
+    flex: 1 1 auto;
+  }
+}
+
+.payment-journey {
+  margin-top: 1rem;
+  padding: 1rem;
+  border: 1px solid #dbe5f2;
+  border-radius: 12px;
+  background: #f8fbff;
+}
+
+.journey-heading {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 1rem;
+}
+
+.journey-heading h3 {
+  margin: 0;
+  font-size: 1rem;
+}
+
+.journey-heading > span {
+  padding: 0.4rem 0.65rem;
+  border-radius: 999px;
+  background: #e8efff;
+  color: #1d4ed8;
+  font-size: 0.75rem;
+  font-weight: 700;
+  text-transform: uppercase;
+}
+
+.payment-steps {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 0.65rem;
+  list-style: none;
+  padding: 0;
+  margin: 1rem 0;
+}
+
+.payment-steps li {
+  display: flex;
+  align-items: flex-start;
+  gap: 0.55rem;
+  min-width: 0;
+  color: #94a3b8;
+}
+
+.payment-steps li > span {
+  display: grid;
+  flex: 0 0 1.55rem;
+  height: 1.55rem;
+  place-items: center;
+  border: 1px solid #cbd5e1;
+  border-radius: 50%;
+  color: #64748b;
+  font-size: 0.75rem;
+  font-weight: 800;
+}
+
+.payment-steps li strong,
+.payment-steps li small {
+  display: block;
+}
+
+.payment-steps li strong {
+  color: #64748b;
+  font-size: 0.8rem;
+}
+
+.payment-steps li small {
+  margin-top: 0.2rem;
+  color: #94a3b8;
+  font-size: 0.72rem;
+  line-height: 1.35;
+}
+
+.payment-steps li.active > span {
+  border-color: #2563eb;
+  background: #2563eb;
+  color: #ffffff;
+}
+
+.payment-steps li.active strong {
+  color: #1d4ed8;
+}
+
+.payment-steps li.complete > span {
+  border-color: #16a34a;
+  background: #16a34a;
+  color: #ffffff;
+}
+
+.payment-steps li.complete strong {
+  color: #166534;
+}
+
+@media (max-width: 780px) {
+  .payment-steps {
+    grid-template-columns: 1fr;
+  }
+}
+
+@media (min-width: 781px) {
+  .shell {
+    display: block;
+    max-width: none;
+  }
+
+  .hero {
+    position: fixed;
+    inset: 0 auto 0 0;
+    z-index: 20;
+    width: 248px;
+    height: 100dvh;
+    min-height: 100dvh;
+  }
+
+  .panel {
+    width: calc(100% - 248px);
+    min-height: 100dvh;
+    margin-left: 248px;
+  }
+}
+
+@media (min-width: 781px) and (max-width: 1180px) {
+  .hero {
+    width: 220px;
+  }
+
+  .panel {
+    width: calc(100% - 220px);
+    margin-left: 220px;
+  }
+}
+
+/* Sidebar navigation */
+.sidebar-nav {
+  display: grid;
+  gap: 0.25rem;
+  margin: 1.25rem 0 1.4rem;
+}
+
+.sidebar-nav-label {
+  margin: 0.2rem 0 0.45rem 0.7rem;
+  color: #64748b;
+  font-size: 0.66rem;
+  font-weight: 800;
+  letter-spacing: 0.16em;
+  text-transform: uppercase;
+}
+
+.sidebar-nav button {
+  display: flex;
+  align-items: center;
+  gap: 0.7rem;
+  width: 100%;
+  padding: 0.7rem 0.75rem;
+  border: 1px solid transparent;
+  border-radius: 9px;
+  background: transparent;
+  color: #94a3b8;
+  font-size: 0.8rem;
+  text-align: left;
+  box-shadow: none;
+}
+
+.sidebar-nav button span {
+  display: grid;
+  width: 1.15rem;
+  height: 1.15rem;
+  place-items: center;
+  color: #64748b;
+  font-size: 0.9rem;
+}
+
+.sidebar-nav button:hover:not(:disabled),
+.sidebar-nav button.active {
+  border-color: rgba(125, 211, 252, 0.14);
+  background: rgba(59, 130, 246, 0.16);
+  color: #f8fafc;
+  box-shadow: none;
+}
+
+.sidebar-nav button.active span {
+  color: #67e8f9;
+}
+
+.topbar-title {
+  display: grid;
+  gap: 0.1rem;
+}
+
+.topbar-title span {
+  color: #64748b;
+  font-size: 0.7rem;
+  letter-spacing: 0.12em;
+  text-transform: uppercase;
+}
+
+.topbar-title strong {
+  color: #0f172a;
+  font-size: 1rem;
+}
+
+.topbar-actions {
+  display: flex;
+  align-items: center;
+  gap: 0.75rem;
+  margin-left: auto;
+}
+
+.topbar-order {
+  color: #64748b;
+  font-size: 0.78rem;
+  font-variant-numeric: tabular-nums;
+}
+
+.topbar-new-order {
+  padding: 0.6rem 0.8rem;
+  font-size: 0.78rem;
+}
+
+@media (min-width: 781px) {
+  .hero-copy {
+    margin-top: 1rem;
+    font-size: 0.78rem;
+  }
+
+  .hero .system-card,
+  .hero .workflow-card {
+    display: none;
+  }
+
+  .hero .stat-grid {
+    margin-top: 0.8rem;
+  }
+}
+
+@media (max-width: 780px) {
+  .topbar {
+    display: flex;
+    align-items: center;
+  }
+
+  .topbar-actions {
+    margin-left: auto;
+  }
+
+  .topbar-order {
+    display: none;
+  }
+}
+
+/* Alignment guard: these rules intentionally win over the legacy theme layers above. */
+@media (min-width: 781px) {
+  html,
+  body,
+  #root {
+    overflow-x: hidden !important;
+  }
+
+  .shell {
+    display: block !important;
+    width: 100% !important;
+    max-width: none !important;
+    min-height: 100dvh !important;
+    padding: 0 !important;
+  }
+
+  .hero {
+    position: fixed !important;
+    inset: 0 auto 0 0 !important;
+    width: 248px !important;
+    height: 100dvh !important;
+    min-height: 100dvh !important;
+    max-height: none !important;
+    margin: 0 !important;
+    overflow: hidden !important;
+  }
+
+  .panel {
+    display: block !important;
+    width: calc(100% - 248px) !important;
+    min-height: 100dvh !important;
+    margin: 0 0 0 248px !important;
+    padding: 0 2.25rem 3rem !important;
+  }
+
+  .topbar {
+    position: sticky !important;
+    top: 0 !important;
+    margin: 0 -2.25rem 1.5rem !important;
+    padding: 1rem 2.25rem !important;
+  }
+}
+
+@media (min-width: 781px) and (max-width: 1180px) {
+  .hero {
+    width: 220px !important;
+  }
+
+  .panel {
+    width: calc(100% - 220px) !important;
+    margin-left: 220px !important;
+    padding-left: 1.25rem !important;
+    padding-right: 1.25rem !important;
+  }
+
+  .topbar {
+    margin-left: -1.25rem !important;
+    margin-right: -1.25rem !important;
+    padding-left: 1.25rem !important;
+    padding-right: 1.25rem !important;
   }
 }
 
@@ -1339,5 +2055,532 @@ button.active {
 
   .hero h1 {
     font-size: 2.35rem;
+  }
+}
+
+/* Final console overrides: keep one page scroll and one application surface. */
+html,
+body,
+#root {
+  width: 100%;
+  min-height: 100%;
+  overflow-x: hidden;
+}
+
+body {
+  background: #f4f6fa;
+}
+
+.shell {
+  grid-template-columns: 248px minmax(0, 1fr);
+  gap: 0;
+  width: 100%;
+  max-width: 1800px;
+  min-height: 100dvh;
+  padding: 0;
+  background: #f4f6fa;
+  align-items: stretch;
+}
+
+.hero {
+  position: sticky;
+  top: 0;
+  width: 248px;
+  min-height: 100dvh;
+  height: 100dvh;
+  max-height: none;
+  min-width: 0;
+  border: 0;
+  border-radius: 0;
+  padding: 1.5rem 1.1rem;
+  overflow: hidden;
+  background: #101a2b;
+  box-shadow: 8px 0 28px rgba(15, 23, 42, 0.08);
+}
+
+.hero::after {
+  width: 220px;
+  height: 220px;
+  right: -90px;
+  bottom: 4%;
+  background: radial-gradient(circle, rgba(37, 99, 235, 0.22), transparent 68%);
+}
+
+.brand-row {
+  align-items: center;
+  padding: 0.5rem 0.55rem 1.5rem;
+  border-bottom: 1px solid rgba(148, 163, 184, 0.14);
+}
+
+.brand-mark {
+  width: 2.65rem;
+  height: 2.65rem;
+  border-radius: 12px;
+  font-size: 1.15rem;
+  box-shadow: none;
+}
+
+.hero h1 {
+  max-width: none;
+  margin-top: 0.2rem;
+  color: #f8fafc;
+  font-size: 1.05rem;
+  line-height: 1.2;
+  letter-spacing: -0.02em;
+}
+
+.eyebrow {
+  color: #7dd3fc;
+  font-size: 0.7rem;
+  letter-spacing: 0.12em;
+}
+
+.hero-copy {
+  max-width: none;
+  padding: 0 0.55rem;
+  color: #94a3b8;
+  font-size: 0.82rem;
+  line-height: 1.55;
+}
+
+.hero .stat-grid {
+  grid-template-columns: 1fr;
+  gap: 0.4rem;
+  padding: 0 0.2rem;
+}
+
+.hero .stat-card,
+.hero .system-card,
+.hero .workflow-card {
+  border-color: rgba(148, 163, 184, 0.14);
+  border-radius: 12px;
+  background: rgba(255, 255, 255, 0.055);
+  box-shadow: none;
+}
+
+.hero .stat-card {
+  min-height: 0;
+  padding: 0.7rem 0.8rem;
+  flex-direction: row;
+  align-items: center;
+}
+
+.hero .stat-card span,
+.hero .system-stats span,
+.hero .system-foot span,
+.hero .workflow-header span,
+.hero .workflow-header small {
+  color: #94a3b8;
+}
+
+.hero .stat-card strong,
+.hero .system-head h3,
+.hero .system-stats strong,
+.hero .workflow li strong {
+  color: #f8fafc;
+}
+
+.hero .stat-card strong {
+  font-size: 0.82rem;
+  text-align: right;
+}
+
+.hero .system-card,
+.hero .workflow-card {
+  padding: 0.8rem;
+}
+
+.hero .system-stats {
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 0.4rem;
+}
+
+.hero .system-stats div {
+  padding: 0.55rem;
+  border-color: rgba(148, 163, 184, 0.12);
+  border-radius: 9px;
+  background: rgba(2, 6, 23, 0.2);
+}
+
+.hero .workflow {
+  gap: 0.55rem;
+  margin-top: 0.75rem;
+}
+
+.hero-footnote {
+  display: none;
+}
+
+.panel {
+  min-width: 0;
+  padding: 0 2.25rem 3rem;
+  border: 0;
+  border-radius: 0;
+  background: #f4f6fa;
+  box-shadow: none;
+  overflow: visible;
+}
+
+.topbar {
+  top: 0;
+  z-index: 10;
+  margin: 0 -2.25rem 1.5rem;
+  padding: 1rem 2.25rem;
+  border-bottom: 1px solid #e2e8f0;
+  background: rgba(244, 246, 250, 0.96);
+}
+
+.segmented {
+  width: 100%;
+  justify-content: flex-start;
+  gap: 0.15rem;
+  padding: 0;
+  border: 0;
+  border-radius: 0;
+  background: transparent;
+  box-shadow: none;
+}
+
+.segmented button {
+  padding: 0.65rem 0.8rem;
+  border-radius: 8px;
+  color: #64748b;
+  font-size: 0.82rem;
+}
+
+.segmented button.active {
+  color: #1d4ed8;
+  background: #e8efff;
+  box-shadow: none;
+}
+
+.workspace-banner {
+  padding: 1rem 1.1rem;
+  border-radius: 12px;
+  box-shadow: none;
+  background: #ffffff;
+}
+
+.workspace-copy h2 {
+  font-size: 1.05rem;
+}
+
+.workspace-copy .subtle {
+  margin-top: 0.25rem;
+  font-size: 0.82rem;
+}
+
+.history-card,
+.card {
+  border-radius: 12px;
+  padding: 1.15rem;
+  box-shadow: 0 1px 2px rgba(15, 23, 42, 0.04);
+}
+
+.history-card {
+  margin-bottom: 0.9rem;
+}
+
+.card-head {
+  margin-bottom: 0.85rem;
+  padding-bottom: 0.75rem;
+}
+
+.card h2 {
+  font-size: 1.2rem;
+}
+
+.order-history-item,
+.rate-card,
+.report-panel,
+.detail-grid div,
+.history li {
+  border-radius: 10px;
+  box-shadow: none;
+}
+
+@media (max-width: 1180px) {
+  .shell {
+    grid-template-columns: 220px minmax(0, 1fr);
+  }
+
+  .hero {
+    width: 220px;
+  }
+
+  .panel {
+    padding-left: 1.25rem;
+    padding-right: 1.25rem;
+  }
+
+  .topbar {
+    margin-left: -1.25rem;
+    margin-right: -1.25rem;
+    padding-left: 1.25rem;
+    padding-right: 1.25rem;
+  }
+}
+
+@media (max-width: 780px) {
+  .shell {
+    display: block;
+  }
+
+  .hero {
+    position: relative;
+    height: auto;
+    max-height: none;
+    padding: 0.85rem;
+  }
+
+  .hero-copy,
+  .hero .system-card,
+  .hero .workflow-card,
+  .hero .stat-grid {
+    display: none;
+  }
+
+  .brand-row {
+    border-bottom: 0;
+    padding-bottom: 0.5rem;
+  }
+
+  .panel {
+    padding: 0 0.75rem 2rem;
+  }
+
+  .topbar {
+    margin: 0 -0.75rem 1rem;
+    padding: 0.65rem 0.75rem;
+    overflow-x: auto;
+  }
+
+  .segmented {
+    width: max-content;
+  }
+}
+
+/* Last-mile layout contract: one application shell, one page scroll, no clipped rail. */
+html,
+body,
+#root {
+  width: 100%;
+  min-width: 0;
+  min-height: 100%;
+  overflow-x: hidden !important;
+}
+
+@media (min-width: 781px) {
+  .shell {
+    display: block !important;
+    width: 100% !important;
+    max-width: none !important;
+    min-height: 100dvh !important;
+    padding: 0 !important;
+  }
+
+  .hero {
+    position: fixed !important;
+    inset: 0 auto 0 0 !important;
+    z-index: 20 !important;
+    display: block !important;
+    width: 248px !important;
+    height: 100dvh !important;
+    min-height: 100dvh !important;
+    max-height: none !important;
+    margin: 0 !important;
+    overflow: hidden !important;
+  }
+
+  .hero .system-card,
+  .hero .workflow-card,
+  .hero-footnote {
+    display: none !important;
+  }
+
+  .panel {
+    display: block !important;
+    width: calc(100% - 248px) !important;
+    min-height: 100dvh !important;
+    margin: 0 0 0 248px !important;
+    padding: 0 2.25rem 3rem !important;
+    overflow: visible !important;
+  }
+
+  .topbar {
+    position: sticky !important;
+    top: 0 !important;
+    z-index: 10 !important;
+    display: flex !important;
+    align-items: center !important;
+    min-height: 72px;
+    margin: 0 -2.25rem 1.5rem !important;
+    padding: 1rem 2.25rem !important;
+  }
+}
+
+@media (min-width: 781px) and (max-width: 1180px) {
+  .hero {
+    width: 220px !important;
+  }
+
+  .panel {
+    width: calc(100% - 220px) !important;
+    margin-left: 220px !important;
+    padding-left: 1.25rem !important;
+    padding-right: 1.25rem !important;
+  }
+
+  .topbar {
+    margin-left: -1.25rem !important;
+    margin-right: -1.25rem !important;
+    padding-left: 1.25rem !important;
+    padding-right: 1.25rem !important;
+  }
+}
+
+@media (max-width: 780px) {
+  .hero {
+    position: relative !important;
+    width: 100% !important;
+    height: auto !important;
+    min-height: 0 !important;
+    max-height: none !important;
+    overflow: visible !important;
+  }
+
+  .panel {
+    width: 100% !important;
+    margin: 0 !important;
+  }
+}
+
+/* Keep navigation marks legible even when a browser has stale font encoding cached. */
+.sidebar-nav button span {
+  font-size: 0;
+  font-weight: 800;
+  line-height: 1;
+}
+
+.sidebar-nav button:nth-of-type(1) span::before {
+  content: '+';
+  font-size: 1rem;
+}
+
+.sidebar-nav button:nth-of-type(2) span::before {
+  content: 'O';
+  font-size: 0.72rem;
+}
+
+.sidebar-nav button:nth-of-type(3) span::before {
+  content: '$';
+  font-size: 0.9rem;
+}
+
+.sidebar-nav button:nth-of-type(4) span::before {
+  content: 'R';
+  font-size: 0.72rem;
+}
+
+.sidebar-nav button:nth-of-type(5) span::before {
+  content: 'W';
+  font-size: 0.72rem;
+}
+
+/* The rail is an overview surface; navigation belongs to the workspace header. */
+.sidebar-nav,
+.sidebar-nav + div {
+  display: none !important;
+}
+
+@media (min-width: 781px) {
+  .hero .system-card {
+    display: block !important;
+    margin-top: 1rem;
+  }
+
+  .hero .workflow-card {
+    display: none !important;
+  }
+
+  .topbar {
+    gap: 1rem;
+  }
+
+  .topbar-nav {
+    display: flex;
+    align-items: center;
+    gap: 0.2rem;
+    min-width: 0;
+    overflow-x: auto;
+    scrollbar-width: none;
+  }
+
+  .topbar-nav::-webkit-scrollbar {
+    display: none;
+  }
+
+  .topbar-nav button {
+    flex: 0 0 auto;
+    padding: 0.55rem 0.65rem;
+    border: 1px solid transparent;
+    border-radius: 8px;
+    background: transparent;
+    color: #64748b;
+    font-size: 0.78rem;
+    box-shadow: none;
+    white-space: nowrap;
+  }
+
+  .topbar-nav button:hover:not(:disabled) {
+    color: #1d4ed8;
+    background: #eef4ff;
+  }
+
+  .topbar-nav button.active {
+    color: #1d4ed8;
+    background: #e8efff;
+    box-shadow: none;
+  }
+}
+
+@media (max-width: 780px) {
+  .topbar {
+    flex-wrap: wrap;
+    gap: 0.55rem;
+  }
+
+  .topbar-title {
+    flex: 1 1 auto;
+    min-width: 10rem;
+  }
+
+  .topbar-nav {
+    order: 3;
+    display: flex;
+    width: 100%;
+    gap: 0.15rem;
+    overflow-x: auto;
+    scrollbar-width: none;
+  }
+
+  .topbar-nav::-webkit-scrollbar {
+    display: none;
+  }
+
+  .topbar-nav button {
+    flex: 0 0 auto;
+    padding: 0.5rem 0.6rem;
+    border: 0;
+    border-radius: 7px;
+    background: transparent;
+    color: #64748b;
+    font-size: 0.75rem;
+    white-space: nowrap;
+  }
+
+  .topbar-nav button.active {
+    color: #1d4ed8;
+    background: #e8efff;
   }
 }

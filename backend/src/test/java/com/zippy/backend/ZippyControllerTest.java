@@ -259,6 +259,61 @@ class ZippyControllerTest {
   }
 
   @Test
+  void rejectsDuplicateShipmentCreation() throws Exception {
+    JsonNode orderBody = createOrder();
+    JsonNode fastShipQuote = findQuote(orderBody, "FASTSHIP");
+    selectCarrier(fastShipQuote);
+
+    mockMvc.perform(post("/api/orders/{orderId}/create-shipment", "ZPY-ORD-10001"))
+        .andExpect(status().isOk());
+
+    mockMvc.perform(post("/api/orders/{orderId}/create-shipment", "ZPY-ORD-10001"))
+        .andExpect(status().isConflict());
+  }
+
+  @Test
+  void rejectsChangingCarrierAfterShipmentCreation() throws Exception {
+    JsonNode orderBody = createOrder();
+    JsonNode fastShipQuote = findQuote(orderBody, "FASTSHIP");
+    selectCarrier(fastShipQuote);
+
+    mockMvc.perform(post("/api/orders/{orderId}/create-shipment", "ZPY-ORD-10001"))
+        .andExpect(status().isOk());
+
+    JsonNode reliableQuote = findQuote(orderBody, "RELIABLE");
+    mockMvc.perform(post("/api/orders/{orderId}/select-carrier", "ZPY-ORD-10001")
+            .contentType("application/json")
+            .content(objectMapper.writeValueAsString(Map.of(
+                "carrierCode", reliableQuote.path("carrierCode").asText(),
+                "serviceCode", reliableQuote.path("serviceCode").asText(),
+                "quotedAmount", reliableQuote.path("totalCharge").decimalValue()
+            ))))
+        .andExpect(status().isConflict());
+  }
+
+  @Test
+  void rejectsUnsupportedWebhookStatus() throws Exception {
+    JsonNode orderBody = createOrder();
+    JsonNode fastShipQuote = findQuote(orderBody, "FASTSHIP");
+    selectCarrier(fastShipQuote);
+
+    mockMvc.perform(post("/api/orders/{orderId}/create-shipment", "ZPY-ORD-10001"))
+        .andExpect(status().isOk());
+
+    Map<String, Object> unsupported = new LinkedHashMap<>();
+    unsupported.put("shipment_id", "FS-700001");
+    unsupported.put("tracking_number", "FST123456789");
+    unsupported.put("event_code", "SOMETHING_NEW");
+    unsupported.put("event_description", "Unknown status");
+    unsupported.put("event_time", "2026-07-25T10:00:00Z");
+
+    mockMvc.perform(post("/api/webhooks/fastship")
+            .contentType("application/json")
+            .content(objectMapper.writeValueAsString(unsupported)))
+        .andExpect(status().isUnprocessableEntity());
+  }
+
+  @Test
   void reusesOrderResponseForSameIdempotencyKey() throws Exception {
     String requestBody = objectMapper.writeValueAsString(sampleOrder());
 
@@ -334,6 +389,91 @@ class ZippyControllerTest {
   }
 
   @Test
+  void completesCodPaymentAfterDelivery() throws Exception {
+    JsonNode orderBody = createOrder();
+    JsonNode fastShipQuote = findQuote(orderBody, "FASTSHIP");
+
+    String paymentsResponse = mockMvc.perform(get("/api/orders/{orderId}/payments", "ZPY-ORD-10001"))
+        .andExpect(status().isOk())
+        .andExpect(jsonPath("$[0].paymentMethod").value("COD"))
+        .andExpect(jsonPath("$[0].status").value("AWAITING_COLLECTION"))
+        .andReturn()
+        .getResponse()
+        .getContentAsString();
+    String paymentId = objectMapper.readTree(paymentsResponse).get(0).path("paymentId").asText();
+
+    selectCarrier(fastShipQuote);
+    mockMvc.perform(post("/api/orders/{orderId}/create-shipment", "ZPY-ORD-10001"))
+        .andExpect(status().isOk());
+
+    mockMvc.perform(post("/api/payments/{paymentId}/collect", paymentId))
+        .andExpect(status().isConflict());
+
+    for (int index = 0; index < 4; index++) {
+      mockMvc.perform(post("/api/mock-carriers/{orderId}/advance", "ZPY-ORD-10001"));
+    }
+
+    mockMvc.perform(post("/api/payments/{paymentId}/collect", paymentId))
+        .andExpect(status().isOk())
+        .andExpect(jsonPath("$.status").value("SUCCEEDED"))
+        .andExpect(jsonPath("$.paymentMethod").value("COD"));
+  }
+
+  @Test
+  void voidsCodReceivableOnRtoAndAllowsDeliveryRetryBranch() throws Exception {
+    JsonNode orderBody = createOrder();
+    JsonNode fastShipQuote = findQuote(orderBody, "FASTSHIP");
+    String paymentId = objectMapper.readTree(mockMvc.perform(get("/api/orders/{orderId}/payments", "ZPY-ORD-10001"))
+        .andReturn().getResponse().getContentAsString()).get(0).path("paymentId").asText();
+    selectCarrier(fastShipQuote);
+    mockMvc.perform(post("/api/orders/{orderId}/create-shipment", "ZPY-ORD-10001"));
+    for (int index = 0; index < 3; index++) {
+      mockMvc.perform(post("/api/mock-carriers/{orderId}/advance", "ZPY-ORD-10001"));
+    }
+
+    Map<String, Object> failed = new LinkedHashMap<>();
+    failed.put("shipment_id", "FS-700001");
+    failed.put("tracking_number", "FST123456789");
+    failed.put("event_code", "DELIVERY_FAILED");
+    failed.put("event_description", "Customer unavailable");
+    failed.put("event_time", "2026-08-02T10:00:00Z");
+    mockMvc.perform(post("/api/webhooks/fastship")
+            .contentType("application/json")
+            .content(objectMapper.writeValueAsString(failed)))
+        .andExpect(status().isOk())
+        .andExpect(jsonPath("$.status").value("DELIVERY_FAILED"));
+
+    Map<String, Object> rto = new LinkedHashMap<>(failed);
+    rto.put("event_code", "RTO");
+    rto.put("event_description", "Returned to origin");
+    rto.put("event_time", "2026-08-02T11:00:00Z");
+    mockMvc.perform(post("/api/webhooks/fastship")
+            .contentType("application/json")
+            .content(objectMapper.writeValueAsString(rto)))
+        .andExpect(status().isOk())
+        .andExpect(jsonPath("$.status").value("RTO"));
+
+    mockMvc.perform(get("/api/payments/{paymentId}", paymentId))
+        .andExpect(status().isOk())
+        .andExpect(jsonPath("$.status").value("VOIDED"));
+  }
+
+  @Test
+  void cancelsOrderAndVoidsUncollectedCod() throws Exception {
+    createOrder();
+    String paymentId = objectMapper.readTree(mockMvc.perform(get("/api/orders/{orderId}/payments", "ZPY-ORD-10001"))
+        .andReturn().getResponse().getContentAsString()).get(0).path("paymentId").asText();
+
+    mockMvc.perform(post("/api/orders/{orderId}/cancel", "ZPY-ORD-10001"))
+        .andExpect(status().isOk())
+        .andExpect(jsonPath("$.order_status").value("CANCELLED"));
+
+    mockMvc.perform(get("/api/payments/{paymentId}", paymentId))
+        .andExpect(status().isOk())
+        .andExpect(jsonPath("$.status").value("VOIDED"));
+  }
+
+  @Test
   void returnsRecentOrderHistory() throws Exception {
     mockMvc.perform(post("/api/orders")
             .contentType("application/json")
@@ -369,6 +509,17 @@ class ZippyControllerTest {
       }
     }
     throw new IllegalStateException("Quote not found for " + carrierCode);
+  }
+
+  private void selectCarrier(JsonNode quote) throws Exception {
+    mockMvc.perform(post("/api/orders/{orderId}/select-carrier", "ZPY-ORD-10001")
+            .contentType("application/json")
+            .content(objectMapper.writeValueAsString(Map.of(
+                "carrierCode", quote.path("carrierCode").asText(),
+                "serviceCode", quote.path("serviceCode").asText(),
+                "quotedAmount", quote.path("totalCharge").decimalValue()
+            ))))
+        .andExpect(status().isOk());
   }
 
   private Map<String, Object> sampleOrder() {

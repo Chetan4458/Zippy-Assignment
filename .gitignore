@@ -1,0 +1,13 @@
+# Java/Maven build output
+backend/target/
+
+# Local runtime databases and logs
+data/*.sqlite*
+backend/data/*.mv.db
+*.log
+
+# Node dependencies and local tooling
+node_modules/
+
+# Generated frontend bundles (Docker rebuilds these)
+public/assets/
