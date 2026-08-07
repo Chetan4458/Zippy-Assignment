@@ -5,9 +5,18 @@ import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.zippy.backend.dto.CarrierSelectionRequest;
 import com.zippy.backend.dto.CreatePaymentIntentRequest;
+import com.zippy.backend.dto.DailyFinanceTrendResponse;
+import com.zippy.backend.dto.DailyTrendReportResponse;
+import com.zippy.backend.dto.FinanceAmountResponse;
+import com.zippy.backend.dto.FinanceFilterResponse;
+import com.zippy.backend.dto.FinanceMetricsResponse;
 import com.zippy.backend.dto.OrderCreateRequest;
+import com.zippy.backend.dto.PaymentActionRequest;
+import com.zippy.backend.dto.PaymentHistoryResponse;
 import com.zippy.backend.dto.PaymentIntentResponse;
 import com.zippy.backend.dto.PaymentFailureRequest;
+import com.zippy.backend.dto.PaymentTransactionHistoryResponse;
+import com.zippy.backend.dto.PaymentTransactionResponse;
 import com.zippy.backend.exception.ApiException;
 import java.math.BigDecimal;
 import java.math.RoundingMode;
@@ -15,8 +24,10 @@ import java.nio.charset.StandardCharsets;
 import java.sql.ResultSet;
 import java.sql.SQLException;
 import java.time.Instant;
-import java.time.LocalDateTime;
+import java.time.LocalDate;
+import java.time.OffsetDateTime;
 import java.time.ZoneOffset;
+import java.time.format.DateTimeParseException;
 import java.time.temporal.ChronoUnit;
 import java.util.ArrayList;
 import java.util.Collections;
@@ -26,24 +37,44 @@ import java.util.List;
 import java.util.Map;
 import java.util.Objects;
 import java.util.UUID;
+import java.util.function.Supplier;
 import java.security.MessageDigest;
 import java.security.NoSuchAlgorithmException;
-import java.util.concurrent.CompletableFuture;
+import java.util.concurrent.CancellationException;
+import java.util.concurrent.ExecutorCompletionService;
 import java.util.concurrent.ExecutorService;
+import java.util.concurrent.Future;
+import java.util.concurrent.RejectedExecutionException;
+import java.util.concurrent.ScheduledExecutorService;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicLong;
 import org.springframework.dao.DuplicateKeyException;
+import org.springframework.dao.DataAccessException;
+import org.springframework.dao.EmptyResultDataAccessException;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
+import org.springframework.beans.factory.annotation.Qualifier;
 import org.springframework.jdbc.core.JdbcTemplate;
 import org.springframework.jdbc.core.RowMapper;
 import org.springframework.jdbc.support.GeneratedKeyHolder;
 import org.springframework.jdbc.support.KeyHolder;
 import org.springframework.beans.factory.annotation.Value;
+import org.springframework.security.authentication.AnonymousAuthenticationToken;
+import org.springframework.security.core.Authentication;
+import org.springframework.security.core.context.SecurityContextHolder;
 import org.springframework.stereotype.Service;
+import org.springframework.transaction.PlatformTransactionManager;
+import org.springframework.transaction.TransactionDefinition;
+import org.springframework.transaction.annotation.Isolation;
 import org.springframework.transaction.annotation.Transactional;
+import org.springframework.transaction.support.TransactionSynchronization;
+import org.springframework.transaction.support.TransactionSynchronizationManager;
+import org.springframework.transaction.support.TransactionTemplate;
 
 @Service
 public class ZippyService {
+  private static final Logger LOGGER = LoggerFactory.getLogger(ZippyService.class);
   private static final BigDecimal ZERO = BigDecimal.ZERO.setScale(2, RoundingMode.HALF_UP);
   private static final String STATUS_ORDER_CREATED = "ORDER_CREATED";
   private static final String STATUS_CARRIER_SELECTED = "CARRIER_SELECTED";
@@ -57,10 +88,14 @@ public class ZippyService {
   private static final String STATUS_CANCELLED = "CANCELLED";
   private static final long DEFAULT_CARRIER_TIMEOUT_MS = 1500L;
   private static final long DEFAULT_AUTOMATION_DELAY_MS = 1500L;
+  private static final long MAX_RUNTIME_DELAY_MS = 10_000L;
 
   private final JdbcTemplate jdbcTemplate;
   private final ObjectMapper objectMapper;
   private final ExecutorService carrierExecutor;
+  private final ScheduledExecutorService automationScheduler;
+  private final TransactionTemplate transactionTemplate;
+  private final TransactionTemplate isolatedTransactionTemplate;
   private final boolean automationEnabled;
   private final AtomicLong fastshipRateDelayMs = new AtomicLong(0);
   private final AtomicLong quickexpressRateDelayMs = new AtomicLong(0);
@@ -68,17 +103,22 @@ public class ZippyService {
   private final AtomicBoolean fastshipRateFailure = new AtomicBoolean(false);
   private final AtomicBoolean quickexpressRateFailure = new AtomicBoolean(false);
   private final AtomicBoolean reliableRateFailure = new AtomicBoolean(false);
-  private final Object sequenceLock = new Object();
 
   public ZippyService(
       JdbcTemplate jdbcTemplate,
       ObjectMapper objectMapper,
-      ExecutorService carrierExecutor,
+      @Qualifier("carrierExecutor") ExecutorService carrierExecutor,
+      @Qualifier("automationScheduler") ScheduledExecutorService automationScheduler,
+      PlatformTransactionManager transactionManager,
       @Value("${zippy.automation-enabled:true}") boolean automationEnabled
   ) {
     this.jdbcTemplate = jdbcTemplate;
     this.objectMapper = objectMapper;
     this.carrierExecutor = carrierExecutor;
+    this.automationScheduler = automationScheduler;
+    this.transactionTemplate = new TransactionTemplate(transactionManager);
+    this.isolatedTransactionTemplate = new TransactionTemplate(transactionManager);
+    this.isolatedTransactionTemplate.setPropagationBehavior(TransactionDefinition.PROPAGATION_REQUIRES_NEW);
     this.automationEnabled = automationEnabled;
   }
 
@@ -86,19 +126,22 @@ public class ZippyService {
   public Map<String, Object> createOrder(OrderCreateRequest request, String idempotencyKey) {
     String normalizedKey = normalizeIdempotencyKey(idempotencyKey);
     String requestHash = normalizedKey == null ? null : hashOrderRequest(request);
-    if (normalizedKey != null) {
-      IdempotencyRecord existing = findIdempotencyRecord(normalizedKey);
-      if (existing != null) {
-        if (!Objects.equals(existing.requestHash(), requestHash)) {
-          throw new ApiException(409, "Idempotency key reused with a different request");
-        }
-        return parseMap(existing.responseJson());
-      }
+    Map<String, Object> replay = findIdempotentReplay(normalizedKey, requestHash);
+    if (replay != null) {
+      return replay;
     }
 
     validateOrder(request);
+    if (normalizedKey != null) {
+      ensureIdempotencyLockRow(normalizedKey);
+      lockIdempotencyKey(normalizedKey);
+      replay = findIdempotentReplay(normalizedKey, requestHash);
+      if (replay != null) {
+        return replay;
+      }
+    }
     String now = now();
-    String orderId = nextOrderId();
+    String orderId = reserveNextOrderId();
     BigDecimal codAmount = "COD".equalsIgnoreCase(request.paymentType()) ? defaultDecimal(request.codAmount()) : null;
 
     KeyHolder keyHolder = new GeneratedKeyHolder();
@@ -120,7 +163,7 @@ public class ZippyService {
       statement.setString(7, toJson(request.deliveryAddress()));
       statement.setString(8, request.pickupAddress().pincode());
       statement.setString(9, request.deliveryAddress().pincode());
-      statement.setInt(10, request.packageDetails().weightGrams().intValue());
+      statement.setInt(10, exactWeightGrams(request.packageDetails().weightGrams()));
       statement.setBigDecimal(11, request.packageDetails().lengthCm());
       statement.setBigDecimal(12, request.packageDetails().widthCm());
       statement.setBigDecimal(13, request.packageDetails().heightCm());
@@ -173,25 +216,46 @@ public class ZippyService {
         ORDER BY id DESC
         LIMIT ? OFFSET ?
         """, orderRowMapper, safeLimit, safeOffset);
+    Map<Long, ShipmentRow> shipmentsByOrderId = findShipmentsByOrderIds(
+        orders.stream().map(OrderRow::id).toList()
+    );
 
     Map<String, Object> response = new LinkedHashMap<>();
     response.put("limit", safeLimit);
     response.put("offset", safeOffset);
     response.put("totalOrders", countRows("orders"));
-    response.put("orders", orders.stream().map(this::orderHistoryToMap).toList());
+    response.put("orders", orders.stream()
+        .map(order -> orderHistoryToMap(order, shipmentsByOrderId.get(order.id())))
+        .toList());
     return response;
   }
 
   public Map<String, Object> getShipmentEvents(String orderId, int limit, int offset) {
     OrderRow order = findOrderByZippyId(orderId);
     ShipmentRow shipment = findShipment(order.id());
-    List<ShipmentEventRow> allEvents = shipment == null ? List.of() : listEvents(shipment.id());
-    List<ShipmentEventRow> page = pageItems(allEvents, limit, offset);
+    int safeLimit = Math.max(1, Math.min(limit, 50));
+    int safeOffset = Math.max(0, offset);
+    long totalEvents = 0L;
+    List<ShipmentEventRow> page = List.of();
+    if (shipment != null) {
+      Long count = jdbcTemplate.queryForObject(
+          "SELECT COUNT(*) FROM shipment_events WHERE shipment_id = ?",
+          Long.class,
+          shipment.id()
+      );
+      totalEvents = count == null ? 0L : count;
+      page = jdbcTemplate.query("""
+          SELECT * FROM shipment_events
+          WHERE shipment_id = ?
+          ORDER BY event_time ASC, id ASC
+          LIMIT ? OFFSET ?
+          """, shipmentEventRowMapper, shipment.id(), safeLimit, safeOffset);
+    }
     Map<String, Object> response = new LinkedHashMap<>();
     response.put("orderId", orderId);
-    response.put("totalEvents", allEvents.size());
-    response.put("limit", Math.max(0, limit));
-    response.put("offset", Math.max(0, offset));
+    response.put("totalEvents", totalEvents);
+    response.put("limit", safeLimit);
+    response.put("offset", safeOffset);
     response.put("events", page.stream().map(this::eventToMap).toList());
     return response;
   }
@@ -210,12 +274,45 @@ public class ZippyService {
     return overview;
   }
 
-  public Map<String, Object> getReportsSummary() {
+  public Map<String, Object> getHealth() {
+    try {
+      Integer databaseProbe = jdbcTemplate.queryForObject("SELECT 1", Integer.class);
+      if (!Integer.valueOf(1).equals(databaseProbe)) {
+        throw new ApiException(503, "Database health check failed");
+      }
+    } catch (DataAccessException exception) {
+      LOGGER.warn("Database health check failed", exception);
+      throw new ApiException(503, "Database health check failed");
+    }
+    return Map.of(
+        "status", "UP",
+        "database", "UP",
+        "timestamp", now()
+    );
+  }
+
+  @Transactional(readOnly = true, isolation = Isolation.REPEATABLE_READ)
+  public Map<String, Object> getReportsSummary(
+      LocalDate from,
+      LocalDate to,
+      String status,
+      String method,
+      String carrier
+  ) {
+    ReportFilter filter = reportFilter(from, to, status, method, carrier, null);
+    FinanceMetricsResponse finance = calculateFinanceMetrics(filter);
     Map<String, Object> summary = new LinkedHashMap<>();
 
     summary.put("totalOrders", countRows("orders"));
     summary.put("totalShipments", countRows("shipments"));
-    summary.put("totalPayments", countRows("payments"));
+    summary.put("totalPayments", countFilteredPayments(filter));
+    summary.put("scope", Map.of(
+        "operationalTotals", "ALL_TIME",
+        "finance", "FILTERED",
+        "cashFlowDateBasis", "PAYMENT_TRANSACTION_CREATED_AT_UTC",
+        "balanceDateBasis", "PAYMENT_CREATED_AT_UTC",
+        "shipmentDateBasis", "SHIPMENT_CREATED_AT_UTC"
+    ));
 
     summary.put("ordersByStatus", jdbcTemplate.query("""
         SELECT order_status AS label, COUNT(*) AS count
@@ -237,62 +334,496 @@ public class ZippyService {
         "count", rs.getLong("count")
     )));
 
-    BigDecimal shippingRevenue = jdbcTemplate.queryForObject(
-        "SELECT COALESCE(SUM(quoted_amount), 0) FROM shipments", BigDecimal.class);
-    summary.put("totalShippingRevenue", defaultDecimal(shippingRevenue));
-
-    BigDecimal codValue = jdbcTemplate.queryForObject(
-        "SELECT COALESCE(SUM(cod_amount), 0) FROM orders WHERE payment_type = 'COD'", BigDecimal.class);
-    summary.put("totalCodValue", defaultDecimal(codValue));
-
-    summary.put("carrierBreakdown", jdbcTemplate.query("""
-        SELECT carrier_code AS carrier, COUNT(*) AS shipments, COALESCE(SUM(quoted_amount), 0) AS revenue
-        FROM shipments
-        GROUP BY carrier_code
-        ORDER BY shipments DESC
-        """, (rs, rowNum) -> {
-      Map<String, Object> row = new LinkedHashMap<>();
-      row.put("carrier", rs.getString("carrier"));
-      row.put("shipments", rs.getLong("shipments"));
-      row.put("revenue", defaultDecimal(rs.getBigDecimal("revenue")));
-      return row;
-    }));
-
-    summary.put("paymentsByStatus", jdbcTemplate.query("""
-        SELECT status AS label, COUNT(*) AS count, COALESCE(SUM(amount), 0) AS totalAmount
-        FROM payments
-        GROUP BY status
-        ORDER BY count DESC
-        """, (rs, rowNum) -> {
-      Map<String, Object> row = new LinkedHashMap<>();
-      row.put("label", rs.getString("label"));
-      row.put("count", rs.getLong("count"));
-      row.put("totalAmount", defaultDecimal(rs.getBigDecimal("totalAmount")));
-      return row;
-    }));
-
-    BigDecimal succeededAmount = jdbcTemplate.queryForObject(
-        "SELECT COALESCE(SUM(amount), 0) FROM payments WHERE status = 'SUCCEEDED'", BigDecimal.class);
-    summary.put("totalPaymentCollected", defaultDecimal(succeededAmount));
+    summary.put("totalShippingCost", finance.shipmentCost());
+    summary.put("totalCodValue", finance.codOutstanding().amount());
+    summary.put("totalPaymentCollected", finance.grossCollected());
+    summary.put("filters", toFilterResponse(filter));
+    summary.put("finance", finance);
+    summary.put("dailyTrend", dailyTrend(filter));
+    summary.put("carrierBreakdown", carrierBreakdown(filter));
+    summary.put("paymentMethodBreakdown", paymentMethodBreakdown(filter));
+    summary.put("paymentsByStatus", paymentStatusBreakdown(filter));
 
     return summary;
   }
 
-  public Map<String, Object> getPaymentHistory(int limit, int offset) {
+  @Transactional(readOnly = true, isolation = Isolation.REPEATABLE_READ)
+  public PaymentHistoryResponse getPaymentHistory(
+      int limit,
+      int offset,
+      LocalDate from,
+      LocalDate to,
+      String status,
+      String method,
+      String carrier,
+      String search
+  ) {
     int safeLimit = Math.max(1, Math.min(limit, 50));
     int safeOffset = Math.max(0, offset);
-    List<PaymentRow> payments = jdbcTemplate.query("""
-        SELECT * FROM payments
-        ORDER BY id DESC
-        LIMIT ? OFFSET ?
-        """, paymentRowMapper, safeLimit, safeOffset);
+    ReportFilter filter = reportFilter(from, to, status, method, carrier, search);
+    SqlFilter paymentFilter = paymentSqlFilter(filter, "p", "s", "p.created_at", true);
+    List<Object> pageArgs = new ArrayList<>(paymentFilter.arguments());
+    pageArgs.add(safeLimit);
+    pageArgs.add(safeOffset);
+    List<PaymentIntentResponse> payments = jdbcTemplate.query("""
+            SELECT p.*
+            FROM payments p
+            LEFT JOIN shipments s ON s.order_id = p.order_id
+            """ + paymentFilter.clause() + " ORDER BY p.created_at DESC, p.id DESC LIMIT ? OFFSET ?",
+        paymentRowMapper,
+        pageArgs.toArray()
+    ).stream().map(this::toPaymentIntentResponse).toList();
 
-    Map<String, Object> response = new LinkedHashMap<>();
-    response.put("limit", safeLimit);
-    response.put("offset", safeOffset);
-    response.put("totalPayments", countRows("payments"));
-    response.put("payments", payments.stream().map(this::paymentToMap).toList());
-    return response;
+    return new PaymentHistoryResponse(
+        safeLimit,
+        safeOffset,
+        countFilteredPayments(filter),
+        payments,
+        toFilterResponse(filter),
+        calculateFinanceMetrics(filter)
+    );
+  }
+
+  @Transactional(readOnly = true, isolation = Isolation.REPEATABLE_READ)
+  public DailyTrendReportResponse getDailyTrend(
+      LocalDate from,
+      LocalDate to,
+      String status,
+      String method,
+      String carrier
+  ) {
+    ReportFilter filter = reportFilter(from, to, status, method, carrier, null);
+    return new DailyTrendReportResponse(toFilterResponse(filter), dailyTrend(filter));
+  }
+
+  private ReportFilter reportFilter(
+      LocalDate from,
+      LocalDate to,
+      String status,
+      String method,
+      String carrier,
+      String search
+  ) {
+    if (from != null && to != null && from.isAfter(to)) {
+      throw new ApiException(400, "from must be on or before to");
+    }
+    Instant fromInclusive = from == null ? null : from.atStartOfDay(ZoneOffset.UTC).toInstant();
+    Instant toExclusive;
+    try {
+      toExclusive = to == null ? null : to.plusDays(1).atStartOfDay(ZoneOffset.UTC).toInstant();
+    } catch (RuntimeException exception) {
+      throw new ApiException(400, "to is outside the supported date range");
+    }
+    return new ReportFilter(
+        from,
+        to,
+        fromInclusive,
+        toExclusive,
+        normalizeReportValue(status),
+        normalizeReportValue(method),
+        normalizeReportValue(carrier),
+        normalizeSearch(search)
+    );
+  }
+
+  private String normalizeReportValue(String value) {
+    if (value == null || value.isBlank()) {
+      return null;
+    }
+    return value.trim().toUpperCase();
+  }
+
+  private String normalizeSearch(String value) {
+    if (value == null || value.isBlank()) {
+      return null;
+    }
+    return value.trim().toLowerCase();
+  }
+
+  private String literalLikePattern(String value) {
+    return "%" + value
+        .replace("!", "!!")
+        .replace("%", "!%")
+        .replace("_", "!_") + "%";
+  }
+
+  private FinanceFilterResponse toFilterResponse(ReportFilter filter) {
+    return new FinanceFilterResponse(
+        filter.from(),
+        filter.to(),
+        filter.fromInclusive(),
+        filter.toExclusive(),
+        filter.status(),
+        filter.method(),
+        filter.carrier(),
+        filter.search()
+    );
+  }
+
+  private SqlFilter paymentSqlFilter(
+      ReportFilter filter,
+      String paymentAlias,
+      String shipmentAlias,
+      String dateExpression,
+      boolean includeSearch
+  ) {
+    StringBuilder clause = new StringBuilder(" WHERE 1 = 1");
+    List<Object> arguments = new ArrayList<>();
+    if (filter.fromInclusive() != null) {
+      clause.append(" AND ").append(dateExpression).append(" >= ?");
+      arguments.add(filter.fromInclusive().toString());
+    }
+    if (filter.toExclusive() != null) {
+      clause.append(" AND ").append(dateExpression).append(" < ?");
+      arguments.add(filter.toExclusive().toString());
+    }
+    if (filter.status() != null) {
+      clause.append(" AND ").append(paymentAlias).append(".status = ?");
+      arguments.add(filter.status());
+    }
+    if (filter.method() != null) {
+      clause.append(" AND ").append(paymentAlias).append(".payment_method = ?");
+      arguments.add(filter.method());
+    }
+    if (filter.carrier() != null) {
+      clause.append(" AND ").append(shipmentAlias).append(".carrier_code = ?");
+      arguments.add(filter.carrier());
+    }
+    if (includeSearch && filter.search() != null) {
+      clause.append(" AND (")
+          .append("LOWER(").append(paymentAlias).append(".payment_id) LIKE ? ESCAPE '!'")
+          .append(" OR LOWER(").append(paymentAlias).append(".zippy_order_id) LIKE ? ESCAPE '!'")
+          .append(" OR LOWER(COALESCE(").append(paymentAlias).append(".provider_reference, '')) LIKE ? ESCAPE '!'")
+          .append(" OR LOWER(COALESCE(").append(paymentAlias).append(".reconciliation_reference, '')) LIKE ? ESCAPE '!'")
+          .append(" OR LOWER(COALESCE(").append(paymentAlias).append(".refund_reference, '')) LIKE ? ESCAPE '!'")
+          .append(" OR LOWER(COALESCE(").append(paymentAlias).append(".refund_reconciliation_reference, '')) LIKE ? ESCAPE '!'")
+          .append(" OR EXISTS (SELECT 1 FROM payment_transactions search_tx")
+          .append(" WHERE search_tx.payment_id = ").append(paymentAlias).append(".id")
+          .append(" AND (LOWER(COALESCE(search_tx.provider_reference, '')) LIKE ? ESCAPE '!'")
+          .append(" OR LOWER(COALESCE(search_tx.reconciliation_reference, '')) LIKE ? ESCAPE '!')))");
+      String pattern = literalLikePattern(filter.search());
+      arguments.add(pattern);
+      arguments.add(pattern);
+      arguments.add(pattern);
+      arguments.add(pattern);
+      arguments.add(pattern);
+      arguments.add(pattern);
+      arguments.add(pattern);
+      arguments.add(pattern);
+    }
+    return new SqlFilter(clause.toString(), arguments);
+  }
+
+  private long countFilteredPayments(ReportFilter filter) {
+    SqlFilter sqlFilter = paymentSqlFilter(filter, "p", "s", "p.created_at", true);
+    Long count = jdbcTemplate.queryForObject("""
+            SELECT COUNT(*)
+            FROM payments p
+            LEFT JOIN shipments s ON s.order_id = p.order_id
+            """ + sqlFilter.clause(), Long.class, sqlFilter.arguments().toArray());
+    return count == null ? 0 : count;
+  }
+
+  private FinanceMetricsResponse calculateFinanceMetrics(ReportFilter filter) {
+    SqlFilter cashFilter = paymentSqlFilter(filter, "p", "s", "t.created_at", true);
+    CashTotals cash = jdbcTemplate.queryForObject("""
+            SELECT
+              COALESCE(SUM(CASE WHEN t.event_type IN ('CAPTURED', 'COD_COLLECTED') THEN t.amount ELSE 0 END), 0) AS gross_collected,
+              COALESCE(SUM(CASE WHEN t.event_type = 'REFUNDED' THEN t.amount ELSE 0 END), 0) AS refunds
+            FROM payment_transactions t
+            JOIN payments p ON p.id = t.payment_id
+            LEFT JOIN shipments s ON s.order_id = p.order_id
+            """ + cashFilter.clause(),
+        (rs, rowNum) -> new CashTotals(
+            defaultDecimal(rs.getBigDecimal("gross_collected")),
+            defaultDecimal(rs.getBigDecimal("refunds"))
+        ),
+        cashFilter.arguments().toArray()
+    );
+
+    SqlFilter paymentFilter = paymentSqlFilter(filter, "p", "s", "p.created_at", true);
+    PaymentBuckets buckets = jdbcTemplate.queryForObject("""
+            SELECT
+              COUNT(CASE WHEN p.status = 'PENDING' THEN 1 END) AS pending_count,
+              COALESCE(SUM(CASE WHEN p.status = 'PENDING' THEN p.amount ELSE 0 END), 0) AS pending_amount,
+              COUNT(CASE WHEN p.status = 'FAILED' THEN 1 END) AS failed_count,
+              COALESCE(SUM(CASE WHEN p.status = 'FAILED' THEN p.amount ELSE 0 END), 0) AS failed_amount,
+              COUNT(CASE WHEN p.status = 'VOIDED' THEN 1 END) AS voided_count,
+              COALESCE(SUM(CASE WHEN p.status = 'VOIDED' THEN p.amount ELSE 0 END), 0) AS voided_amount,
+              COUNT(CASE WHEN p.status = 'AWAITING_COLLECTION' AND p.payment_method = 'COD' THEN 1 END) AS cod_count,
+              COALESCE(SUM(CASE WHEN p.status = 'AWAITING_COLLECTION' AND p.payment_method = 'COD' THEN p.amount ELSE 0 END), 0) AS cod_amount
+            FROM payments p
+            LEFT JOIN shipments s ON s.order_id = p.order_id
+            """ + paymentFilter.clause(),
+        (rs, rowNum) -> new PaymentBuckets(
+            rs.getLong("pending_count"), defaultDecimal(rs.getBigDecimal("pending_amount")),
+            rs.getLong("failed_count"), defaultDecimal(rs.getBigDecimal("failed_amount")),
+            rs.getLong("voided_count"), defaultDecimal(rs.getBigDecimal("voided_amount")),
+            rs.getLong("cod_count"), defaultDecimal(rs.getBigDecimal("cod_amount"))
+        ),
+        paymentFilter.arguments().toArray()
+    );
+
+    ShipmentTotals shipmentTotals = shipmentTotals(filter);
+    CashTotals safeCash = cash == null ? new CashTotals(ZERO, ZERO) : cash;
+    PaymentBuckets safeBuckets = buckets == null ? PaymentBuckets.empty() : buckets;
+    return new FinanceMetricsResponse(
+        "INR",
+        safeCash.grossCollected(),
+        safeCash.refunds(),
+        safeCash.grossCollected().subtract(safeCash.refunds()).setScale(2, RoundingMode.HALF_UP),
+        new FinanceAmountResponse(safeBuckets.pendingCount(), safeBuckets.pendingAmount()),
+        new FinanceAmountResponse(safeBuckets.failedCount(), safeBuckets.failedAmount()),
+        new FinanceAmountResponse(safeBuckets.voidedCount(), safeBuckets.voidedAmount()),
+        new FinanceAmountResponse(safeBuckets.codCount(), safeBuckets.codAmount()),
+        shipmentTotals.shippingCost(),
+        shipmentTotals.costedCount(),
+        shipmentTotals.activeCount()
+    );
+  }
+
+  private ShipmentTotals shipmentTotals(ReportFilter filter) {
+    StringBuilder where = new StringBuilder(" WHERE 1 = 1");
+    List<Object> arguments = new ArrayList<>();
+    if (filter.fromInclusive() != null) {
+      where.append(" AND s.created_at >= ?");
+      arguments.add(filter.fromInclusive().toString());
+    }
+    if (filter.toExclusive() != null) {
+      where.append(" AND s.created_at < ?");
+      arguments.add(filter.toExclusive().toString());
+    }
+    if (filter.carrier() != null) {
+      where.append(" AND s.carrier_code = ?");
+      arguments.add(filter.carrier());
+    }
+    appendShipmentPaymentExistsFilter(where, arguments, filter);
+    ShipmentTotals result = jdbcTemplate.queryForObject("""
+            SELECT
+              COALESCE(SUM(CASE WHEN s.current_status NOT IN ('CANCELLED', 'RTO') THEN s.quoted_amount ELSE 0 END), 0) AS shipping_cost,
+              COUNT(CASE WHEN s.current_status NOT IN ('CANCELLED', 'RTO') THEN 1 END) AS costed_count,
+              COUNT(CASE WHEN s.current_status NOT IN ('CANCELLED', 'RTO', 'DELIVERED') THEN 1 END) AS active_count
+            FROM shipments s
+            """ + where,
+        (rs, rowNum) -> new ShipmentTotals(
+            defaultDecimal(rs.getBigDecimal("shipping_cost")),
+            rs.getLong("costed_count"),
+            rs.getLong("active_count")
+        ),
+        arguments.toArray()
+    );
+    return result == null ? new ShipmentTotals(ZERO, 0, 0) : result;
+  }
+
+  private void appendShipmentPaymentExistsFilter(
+      StringBuilder where,
+      List<Object> arguments,
+      ReportFilter filter
+  ) {
+    if (filter.status() == null && filter.method() == null && filter.search() == null) {
+      return;
+    }
+    where.append(" AND EXISTS (SELECT 1 FROM payments ep WHERE ep.order_id = s.order_id")
+        .append(" AND ep.id = (SELECT MAX(canonical_payment.id) FROM payments canonical_payment")
+        .append(" WHERE canonical_payment.order_id = s.order_id)");
+    if (filter.status() != null) {
+      where.append(" AND ep.status = ?");
+      arguments.add(filter.status());
+    }
+    if (filter.method() != null) {
+      where.append(" AND ep.payment_method = ?");
+      arguments.add(filter.method());
+    }
+    if (filter.search() != null) {
+      String pattern = literalLikePattern(filter.search());
+      where.append(" AND (LOWER(ep.payment_id) LIKE ? ESCAPE '!' OR LOWER(ep.zippy_order_id) LIKE ? ESCAPE '!'")
+          .append(" OR LOWER(COALESCE(ep.provider_reference, '')) LIKE ? ESCAPE '!'")
+          .append(" OR LOWER(COALESCE(ep.reconciliation_reference, '')) LIKE ? ESCAPE '!'")
+          .append(" OR LOWER(COALESCE(ep.refund_reference, '')) LIKE ? ESCAPE '!'")
+          .append(" OR LOWER(COALESCE(ep.refund_reconciliation_reference, '')) LIKE ? ESCAPE '!'")
+          .append(" OR EXISTS (SELECT 1 FROM payment_transactions search_tx")
+          .append(" WHERE search_tx.payment_id = ep.id")
+          .append(" AND (LOWER(COALESCE(search_tx.provider_reference, '')) LIKE ? ESCAPE '!'")
+          .append(" OR LOWER(COALESCE(search_tx.reconciliation_reference, '')) LIKE ? ESCAPE '!')))");
+      arguments.add(pattern);
+      arguments.add(pattern);
+      arguments.add(pattern);
+      arguments.add(pattern);
+      arguments.add(pattern);
+      arguments.add(pattern);
+      arguments.add(pattern);
+      arguments.add(pattern);
+    }
+    where.append(')');
+  }
+
+  private List<DailyFinanceTrendResponse> dailyTrend(ReportFilter filter) {
+    SqlFilter sqlFilter = paymentSqlFilter(filter, "p", "s", "t.created_at", false);
+    return jdbcTemplate.query("""
+            SELECT SUBSTRING(t.created_at, 1, 10) AS report_date,
+                   COALESCE(SUM(CASE WHEN t.event_type IN ('CAPTURED', 'COD_COLLECTED') THEN t.amount ELSE 0 END), 0) AS gross_collected,
+                   COALESCE(SUM(CASE WHEN t.event_type = 'REFUNDED' THEN t.amount ELSE 0 END), 0) AS refunds,
+                   COUNT(*) AS transactions
+            FROM payment_transactions t
+            JOIN payments p ON p.id = t.payment_id
+            LEFT JOIN shipments s ON s.order_id = p.order_id
+            """ + sqlFilter.clause()
+            + " AND t.event_type IN ('CAPTURED', 'COD_COLLECTED', 'REFUNDED')"
+            + " GROUP BY SUBSTRING(t.created_at, 1, 10) ORDER BY report_date",
+        (rs, rowNum) -> {
+          BigDecimal gross = defaultDecimal(rs.getBigDecimal("gross_collected"));
+          BigDecimal refunds = defaultDecimal(rs.getBigDecimal("refunds"));
+          return new DailyFinanceTrendResponse(
+              LocalDate.parse(rs.getString("report_date")),
+              gross,
+              refunds,
+              gross.subtract(refunds).setScale(2, RoundingMode.HALF_UP),
+              rs.getLong("transactions")
+          );
+        },
+        sqlFilter.arguments().toArray()
+    );
+  }
+
+  private List<Map<String, Object>> paymentStatusBreakdown(ReportFilter filter) {
+    SqlFilter sqlFilter = paymentSqlFilter(filter, "p", "s", "p.created_at", false);
+    return jdbcTemplate.query("""
+            SELECT p.status AS label, COUNT(*) AS count, COALESCE(SUM(p.amount), 0) AS total_amount
+            FROM payments p
+            LEFT JOIN shipments s ON s.order_id = p.order_id
+            """ + sqlFilter.clause() + " GROUP BY p.status ORDER BY count DESC, p.status",
+        (rs, rowNum) -> {
+          Map<String, Object> row = new LinkedHashMap<>();
+          row.put("label", rs.getString("label"));
+          row.put("count", rs.getLong("count"));
+          row.put("totalAmount", defaultDecimal(rs.getBigDecimal("total_amount")));
+          return row;
+        },
+        sqlFilter.arguments().toArray()
+    );
+  }
+
+  private List<Map<String, Object>> paymentMethodBreakdown(ReportFilter filter) {
+    Map<String, BreakdownTotals> totals = new LinkedHashMap<>();
+    SqlFilter paymentFilter = paymentSqlFilter(filter, "p", "s", "p.created_at", false);
+    jdbcTemplate.query("""
+            SELECT p.payment_method AS label, COUNT(*) AS count,
+                   COALESCE(SUM(p.amount), 0) AS total_amount,
+                   COALESCE(SUM(CASE WHEN p.status = 'AWAITING_COLLECTION' THEN p.amount ELSE 0 END), 0) AS outstanding
+            FROM payments p
+            LEFT JOIN shipments s ON s.order_id = p.order_id
+            """ + paymentFilter.clause() + " GROUP BY p.payment_method ORDER BY p.payment_method",
+        rs -> {
+          BreakdownTotals value = totals.computeIfAbsent(rs.getString("label"), ignored -> new BreakdownTotals());
+          value.count = rs.getLong("count");
+          value.totalAmount = defaultDecimal(rs.getBigDecimal("total_amount"));
+          value.outstanding = defaultDecimal(rs.getBigDecimal("outstanding"));
+        }, paymentFilter.arguments().toArray());
+
+    SqlFilter cashFilter = paymentSqlFilter(filter, "p", "s", "t.created_at", false);
+    jdbcTemplate.query("""
+            SELECT p.payment_method AS label,
+                   COALESCE(SUM(CASE WHEN t.event_type IN ('CAPTURED', 'COD_COLLECTED') THEN t.amount ELSE 0 END), 0) AS gross,
+                   COALESCE(SUM(CASE WHEN t.event_type = 'REFUNDED' THEN t.amount ELSE 0 END), 0) AS refunds
+            FROM payment_transactions t
+            JOIN payments p ON p.id = t.payment_id
+            LEFT JOIN shipments s ON s.order_id = p.order_id
+            """ + cashFilter.clause()
+            + " AND t.event_type IN ('CAPTURED', 'COD_COLLECTED', 'REFUNDED')"
+            + " GROUP BY p.payment_method ORDER BY p.payment_method",
+        rs -> {
+          BreakdownTotals value = totals.computeIfAbsent(rs.getString("label"), ignored -> new BreakdownTotals());
+          value.gross = defaultDecimal(rs.getBigDecimal("gross"));
+          value.refunds = defaultDecimal(rs.getBigDecimal("refunds"));
+        }, cashFilter.arguments().toArray());
+
+    return totals.entrySet().stream().sorted(Map.Entry.comparingByKey()).map(entry -> {
+      BreakdownTotals value = entry.getValue();
+      Map<String, Object> row = new LinkedHashMap<>();
+      row.put("label", entry.getKey());
+      row.put("count", value.count);
+      row.put("totalAmount", value.totalAmount);
+      row.put("grossCollected", value.gross);
+      row.put("refunds", value.refunds);
+      row.put("netCollected", value.gross.subtract(value.refunds).setScale(2, RoundingMode.HALF_UP));
+      row.put("outstanding", value.outstanding);
+      return row;
+    }).toList();
+  }
+
+  private List<Map<String, Object>> carrierBreakdown(ReportFilter filter) {
+    Map<String, CarrierTotals> totals = new LinkedHashMap<>();
+    StringBuilder shipmentWhere = new StringBuilder(" WHERE 1 = 1");
+    List<Object> shipmentArguments = new ArrayList<>();
+    if (filter.fromInclusive() != null) {
+      shipmentWhere.append(" AND s.created_at >= ?");
+      shipmentArguments.add(filter.fromInclusive().toString());
+    }
+    if (filter.toExclusive() != null) {
+      shipmentWhere.append(" AND s.created_at < ?");
+      shipmentArguments.add(filter.toExclusive().toString());
+    }
+    if (filter.carrier() != null) {
+      shipmentWhere.append(" AND s.carrier_code = ?");
+      shipmentArguments.add(filter.carrier());
+    }
+    appendShipmentPaymentExistsFilter(shipmentWhere, shipmentArguments, filter);
+    jdbcTemplate.query("""
+            SELECT s.carrier_code AS carrier, COUNT(*) AS shipments,
+                   COUNT(CASE WHEN s.current_status NOT IN ('CANCELLED', 'RTO', 'DELIVERED') THEN 1 END) AS active_shipments,
+                   COALESCE(SUM(CASE WHEN s.current_status NOT IN ('CANCELLED', 'RTO') THEN s.quoted_amount ELSE 0 END), 0) AS shipping_cost
+            FROM shipments s
+            """ + shipmentWhere + " GROUP BY s.carrier_code ORDER BY s.carrier_code",
+        rs -> {
+          CarrierTotals value = totals.computeIfAbsent(rs.getString("carrier"), ignored -> new CarrierTotals());
+          value.shipments = rs.getLong("shipments");
+          value.activeShipments = rs.getLong("active_shipments");
+          value.shippingCost = defaultDecimal(rs.getBigDecimal("shipping_cost"));
+        }, shipmentArguments.toArray());
+
+    SqlFilter cashFilter = paymentSqlFilter(filter, "p", "s", "t.created_at", false);
+    jdbcTemplate.query("""
+            SELECT s.carrier_code AS carrier,
+                   COALESCE(SUM(CASE WHEN t.event_type IN ('CAPTURED', 'COD_COLLECTED') THEN t.amount ELSE 0 END), 0) AS gross,
+                   COALESCE(SUM(CASE WHEN t.event_type = 'REFUNDED' THEN t.amount ELSE 0 END), 0) AS refunds
+            FROM payment_transactions t
+            JOIN payments p ON p.id = t.payment_id
+            JOIN shipments s ON s.order_id = p.order_id
+            """ + cashFilter.clause()
+            + " AND t.event_type IN ('CAPTURED', 'COD_COLLECTED', 'REFUNDED')"
+            + " GROUP BY s.carrier_code ORDER BY s.carrier_code",
+        rs -> {
+          CarrierTotals value = totals.computeIfAbsent(rs.getString("carrier"), ignored -> new CarrierTotals());
+          value.gross = defaultDecimal(rs.getBigDecimal("gross"));
+          value.refunds = defaultDecimal(rs.getBigDecimal("refunds"));
+        }, cashFilter.arguments().toArray());
+
+    SqlFilter outstandingFilter = paymentSqlFilter(filter, "p", "s", "p.created_at", false);
+    jdbcTemplate.query("""
+            SELECT s.carrier_code AS carrier,
+                   COALESCE(SUM(CASE WHEN p.status = 'AWAITING_COLLECTION' AND p.payment_method = 'COD' THEN p.amount ELSE 0 END), 0) AS outstanding
+            FROM payments p
+            JOIN shipments s ON s.order_id = p.order_id
+            """ + outstandingFilter.clause() + " GROUP BY s.carrier_code ORDER BY s.carrier_code",
+        rs -> {
+          totals.computeIfAbsent(rs.getString("carrier"), ignored -> new CarrierTotals()).outstanding =
+              defaultDecimal(rs.getBigDecimal("outstanding"));
+        },
+        outstandingFilter.arguments().toArray());
+
+    return totals.entrySet().stream().sorted(Map.Entry.comparingByKey()).map(entry -> {
+      CarrierTotals value = entry.getValue();
+      Map<String, Object> row = new LinkedHashMap<>();
+      row.put("carrier", entry.getKey());
+      row.put("shipments", value.shipments);
+      row.put("activeShipments", value.activeShipments);
+      row.put("shippingCost", value.shippingCost);
+      row.put("grossCollected", value.gross);
+      row.put("refunds", value.refunds);
+      row.put("netCollected", value.gross.subtract(value.refunds).setScale(2, RoundingMode.HALF_UP));
+      row.put("codOutstanding", value.outstanding);
+      return row;
+    }).toList();
   }
 
   public Map<String, Object> getRates(String orderId, String sortBy) {
@@ -305,7 +836,11 @@ public class ZippyService {
 
   @Transactional
   public Map<String, Object> selectCarrier(String orderId, CarrierSelectionRequest request) {
-    OrderRow order = findOrderByZippyId(orderId);
+    OrderRow order = findOrderByZippyOrderIdForUpdate(orderId);
+    if (!STATUS_ORDER_CREATED.equals(order.orderStatus())
+        && !STATUS_CARRIER_SELECTED.equals(order.orderStatus())) {
+      throw new ApiException(409, "Carrier cannot be selected for an order in status " + order.orderStatus());
+    }
     ShippingQuote quote = findQuote(order.id(), request.carrierCode(), request.serviceCode());
     if (quote.totalCharge().compareTo(request.quotedAmount().setScale(2, RoundingMode.HALF_UP)) != 0) {
       throw new ApiException(409, "Quoted amount does not match stored quote");
@@ -313,9 +848,20 @@ public class ZippyService {
 
     String now = now();
     String selectedQuoteJson = toJson(quoteToMap(quote));
-    ShipmentRow existingShipment = findShipment(order.id());
+    ShipmentRow existingShipment = findShipmentForUpdate(order.id());
     if (existingShipment != null && !STATUS_CARRIER_SELECTED.equals(existingShipment.currentStatus())) {
       throw new ApiException(409, "Carrier cannot be changed after shipment creation");
+    }
+    if (existingShipment != null
+        && existingShipment.carrierCode().equals(quote.carrierCode())
+        && existingShipment.selectedServiceCode().equals(quote.serviceCode())
+        && existingShipment.quotedAmount().compareTo(quote.totalCharge()) == 0) {
+      return selectedCarrierResponse(orderId, existingShipment);
+    }
+    if (existingShipment != null
+        && "PREPAID".equalsIgnoreCase(order.paymentType())
+        && hasAnyPrepaidPayment(order.id())) {
+      throw new ApiException(409, "Carrier cannot be changed after a prepaid payment intent exists");
     }
     if (existingShipment == null) {
       jdbcTemplate.update("""
@@ -340,7 +886,11 @@ public class ZippyService {
 
     jdbcTemplate.update("UPDATE orders SET order_status = ?, updated_at = ? WHERE id = ?",
         STATUS_CARRIER_SELECTED, now, order.id());
-    ShipmentRow shipment = findShipment(order.id());
+    ShipmentRow shipment = findShipmentForUpdate(order.id());
+    return selectedCarrierResponse(orderId, shipment);
+  }
+
+  private Map<String, Object> selectedCarrierResponse(String orderId, ShipmentRow shipment) {
     return Map.of(
         "orderId", orderId,
         "selectedShipment", Map.of(
@@ -355,12 +905,16 @@ public class ZippyService {
   @Transactional
   public Map<String, Object> createShipment(String orderId) {
     OrderRow order = findOrderByZippyOrderIdForUpdate(orderId);
-    ShipmentRow shipment = findShipment(order.id());
+    ShipmentRow shipment = findShipmentForUpdate(order.id());
     if (shipment == null) {
       throw new ApiException(409, "Carrier not selected");
     }
     if (!STATUS_CARRIER_SELECTED.equals(shipment.currentStatus())) {
       throw new ApiException(409, "Shipment has already been created or is not ready for creation");
+    }
+    if ("PREPAID".equalsIgnoreCase(order.paymentType())
+        && !hasMatchingSucceededPrepaidPayment(order.id(), shipment.quotedAmount())) {
+      throw new ApiException(409, "A successful prepaid payment matching the selected shipment charge is required");
     }
 
     ShippingQuote quote = parseQuote(shipment.selectedQuoteJson());
@@ -394,7 +948,7 @@ public class ZippyService {
     ShipmentRow updatedShipment = findShipment(order.id());
     recordCarrierEvent(updatedShipment, initialWebhookPayloadJson(updatedShipment, order), now);
     if (automationEnabled) {
-      scheduleAutomation(updatedShipment.id(), updatedShipment.carrierCode());
+      scheduleAutomationAfterCommit(updatedShipment.id(), updatedShipment.carrierCode());
     }
     return Map.of(
         "orderId", orderId,
@@ -411,7 +965,7 @@ public class ZippyService {
   @Transactional
   public Map<String, Object> cancelOrder(String orderId) {
     OrderRow order = findOrderByZippyOrderIdForUpdate(orderId);
-    ShipmentRow shipment = findShipment(order.id());
+    ShipmentRow shipment = findShipmentForUpdate(order.id());
     String currentStatus = shipment == null ? order.orderStatus() : shipment.currentStatus();
     if (!isCancellableStatus(currentStatus)) {
       throw new ApiException(409, "Order cannot be cancelled from status " + currentStatus);
@@ -442,6 +996,7 @@ public class ZippyService {
         || STATUS_SHIPMENT_CREATED.equals(status);
   }
 
+  @Transactional
   public Map<String, Object> handleWebhook(String carrierCode, JsonNode payload) {
     String normalizedCarrier = carrierCode == null ? "" : carrierCode.trim().toUpperCase();
     if (!List.of("FASTSHIP", "QUICKEXPRESS", "RELIABLE").contains(normalizedCarrier)) {
@@ -449,13 +1004,27 @@ public class ZippyService {
     }
 
     CarrierEvent event = mapWebhook(normalizedCarrier, payload);
-    ShipmentRow shipment = findShipmentByTracking(event.trackingKey(), event.trackingField());
-    if (shipment == null) {
+    ShipmentRow candidate = findShipmentByTracking(
+        normalizedCarrier,
+        event.trackingKey(),
+        event.trackingField()
+    );
+    if (candidate == null) {
+      throw new ApiException(404, "Unknown tracking number");
+    }
+    OrderRow order = findOrderByIdForUpdate(candidate.orderId());
+    ShipmentRow shipment = findShipmentByTrackingForUpdate(
+        normalizedCarrier,
+        event.trackingKey(),
+        event.trackingField()
+    );
+    if (shipment == null || shipment.orderId() != order.id()) {
       throw new ApiException(404, "Unknown tracking number");
     }
     return recordCarrierEvent(shipment, payload, now(), event);
   }
 
+  @Transactional
   public Map<String, Object> advanceMockCarrier(String orderId) {
     ShipmentRow shipment = requireShipment(orderId);
     String nextStatus = nextAutomatedStatus(shipment.currentStatus());
@@ -466,6 +1035,7 @@ public class ZippyService {
     return handleWebhook(shipment.carrierCode(), payload);
   }
 
+  @Transactional
   public Map<String, Object> mockDeliveryFailure(String orderId) {
     ShipmentRow shipment = requireShipment(orderId);
     if (!STATUS_OUT_FOR_DELIVERY.equals(shipment.currentStatus())) {
@@ -474,6 +1044,7 @@ public class ZippyService {
     return handleWebhook(shipment.carrierCode(), buildWebhookPayload(shipment, STATUS_DELIVERY_FAILED));
   }
 
+  @Transactional
   public Map<String, Object> mockRto(String orderId) {
     ShipmentRow shipment = requireShipment(orderId);
     if (!STATUS_DELIVERY_FAILED.equals(shipment.currentStatus())) {
@@ -510,32 +1081,37 @@ public class ZippyService {
   }
 
   public Map<String, Object> mockFastshipShipment(JsonNode payload) {
+    long offset = mockPayloadOffset(payload);
+    String shipmentId = mockIdentifier("FS-", 700001L, offset, 6);
+    String trackingNumber = mockIdentifier("FST", 123456789L, offset, 9);
     return Map.of(
         "success", true,
-        "shipment_id", "FS-700001",
-        "tracking_number", "FST123456789",
-        "label_url", "http://mock-fastship/labels/FST123456789.pdf",
+        "shipment_id", shipmentId,
+        "tracking_number", trackingNumber,
+        "label_url", "http://mock-fastship/labels/" + trackingNumber + ".pdf",
         "status", "BOOKED"
     );
   }
 
   public Map<String, Object> mockQuickexpressShipment(JsonNode payload) {
+    long offset = mockPayloadOffset(payload);
     return Map.of(
         "bookingStatus", "CONFIRMED",
         "booking", Map.of(
-            "bookingId", "QE-B-800001",
-            "awb", "QE987654321",
+            "bookingId", mockIdentifier("QE-B-", 800001L, offset, 6),
+            "awb", mockIdentifier("QE", 987654321L, offset, 9),
             "currentState", "SHIPMENT_CREATED"
         )
     );
   }
 
   public Map<String, Object> mockReliableShipment(JsonNode payload) {
+    long offset = mockPayloadOffset(payload);
     return Map.of(
         "result", "ACCEPTED",
         "deliveryOrder", Map.of(
-            "id", "RC-DO-600001",
-            "trackingCode", "RC1122334455"
+            "id", mockIdentifier("RC-DO-", 600001L, offset, 6),
+            "trackingCode", mockIdentifier("RC", 1122334455L, offset, 10)
         ),
         "message", "Shipment successfully registered"
     );
@@ -543,13 +1119,13 @@ public class ZippyService {
 
   public void setRuntimeFlags(Map<String, Object> payload) {
     if (payload.containsKey("fastshipRateDelayMs")) {
-      fastshipRateDelayMs.set(longValue(payload.get("fastshipRateDelayMs")));
+      fastshipRateDelayMs.set(runtimeDelay(payload.get("fastshipRateDelayMs"), "fastshipRateDelayMs"));
     }
     if (payload.containsKey("quickexpressRateDelayMs")) {
-      quickexpressRateDelayMs.set(longValue(payload.get("quickexpressRateDelayMs")));
+      quickexpressRateDelayMs.set(runtimeDelay(payload.get("quickexpressRateDelayMs"), "quickexpressRateDelayMs"));
     }
     if (payload.containsKey("reliableRateDelayMs")) {
-      reliableRateDelayMs.set(longValue(payload.get("reliableRateDelayMs")));
+      reliableRateDelayMs.set(runtimeDelay(payload.get("reliableRateDelayMs"), "reliableRateDelayMs"));
     }
     if (payload.containsKey("fastshipRateFailure")) {
       fastshipRateFailure.set(booleanValue(payload.get("fastshipRateFailure")));
@@ -657,38 +1233,66 @@ public class ZippyService {
   }
 
   private List<ShippingQuote> getCarrierQuotes(OrderRow order) {
-    List<CompletableFuture<ShippingQuote>> futures = List.of(
-        CompletableFuture.supplyAsync(() -> {
-          sleep(fastshipRateDelayMs.get());
-          if (fastshipRateFailure.get()) {
-            throw new IllegalStateException("FastShip rate service unavailable");
-          }
-          return fastShipQuote(order);
-        }, carrierExecutor),
-        CompletableFuture.supplyAsync(() -> {
-          sleep(quickexpressRateDelayMs.get());
-          if (quickexpressRateFailure.get()) {
-            throw new IllegalStateException("QuickExpress rate service unavailable");
-          }
-          return quickExpressQuote(order);
-        }, carrierExecutor),
-        CompletableFuture.supplyAsync(() -> {
-          sleep(reliableRateDelayMs.get());
-          if (reliableRateFailure.get()) {
-            throw new IllegalStateException("ReliableCourier rate service unavailable");
-          }
-          return reliableQuote(order);
-        }, carrierExecutor)
-    );
+    ExecutorCompletionService<ShippingQuote> completionService = new ExecutorCompletionService<>(carrierExecutor);
+    List<Future<ShippingQuote>> futures = new ArrayList<>();
+    submitCarrierQuote(completionService, futures, () -> {
+      sleep(fastshipRateDelayMs.get());
+      if (fastshipRateFailure.get()) {
+        throw new IllegalStateException("FastShip rate service unavailable");
+      }
+      return fastShipQuote(order);
+    });
+    submitCarrierQuote(completionService, futures, () -> {
+      sleep(quickexpressRateDelayMs.get());
+      if (quickexpressRateFailure.get()) {
+        throw new IllegalStateException("QuickExpress rate service unavailable");
+      }
+      return quickExpressQuote(order);
+    });
+    submitCarrierQuote(completionService, futures, () -> {
+      sleep(reliableRateDelayMs.get());
+      if (reliableRateFailure.get()) {
+        throw new IllegalStateException("ReliableCourier rate service unavailable");
+      }
+      return reliableQuote(order);
+    });
 
+    long deadline = System.nanoTime() + TimeUnit.MILLISECONDS.toNanos(DEFAULT_CARRIER_TIMEOUT_MS);
     List<ShippingQuote> quotes = new ArrayList<>();
-    for (CompletableFuture<ShippingQuote> future : futures) {
+    int remaining = futures.size();
+    while (remaining > 0) {
+      long remainingNanos = deadline - System.nanoTime();
+      if (remainingNanos <= 0) {
+        break;
+      }
       try {
-        quotes.add(future.orTimeout(DEFAULT_CARRIER_TIMEOUT_MS, TimeUnit.MILLISECONDS).join());
-      } catch (Exception ignored) {
+        Future<ShippingQuote> completed = completionService.poll(remainingNanos, TimeUnit.NANOSECONDS);
+        if (completed == null) {
+          break;
+        }
+        remaining--;
+        quotes.add(completed.get());
+      } catch (InterruptedException exception) {
+        Thread.currentThread().interrupt();
+        break;
+      } catch (Exception exception) {
+        LOGGER.warn("Carrier quote request failed: {}", exception.getMessage());
       }
     }
+    futures.stream().filter(future -> !future.isDone()).forEach(future -> future.cancel(true));
     return sortQuotes(quotes, "lowest");
+  }
+
+  private void submitCarrierQuote(
+      ExecutorCompletionService<ShippingQuote> completionService,
+      List<Future<ShippingQuote>> futures,
+      Supplier<ShippingQuote> supplier
+  ) {
+    try {
+      futures.add(completionService.submit(supplier::get));
+    } catch (RejectedExecutionException exception) {
+      LOGGER.warn("Carrier quote request rejected because the worker pool is saturated");
+    }
   }
 
   private String nextAutomatedStatus(String currentStatus) {
@@ -738,6 +1342,15 @@ public class ZippyService {
     return shipments.isEmpty() ? null : shipments.getFirst();
   }
 
+  private ShipmentRow findShipmentForUpdate(long orderId) {
+    List<ShipmentRow> shipments = jdbcTemplate.query(
+        "SELECT * FROM shipments WHERE order_id = ? FOR UPDATE",
+        shipmentRowMapper,
+        orderId
+    );
+    return shipments.isEmpty() ? null : shipments.getFirst();
+  }
+
   private ShipmentRow requireShipment(String orderId) {
     OrderRow order = findOrderByZippyId(orderId);
     ShipmentRow shipment = findShipment(order.id());
@@ -751,14 +1364,21 @@ public class ZippyService {
     return jdbcTemplate.query("SELECT * FROM shipment_events WHERE shipment_id = ? ORDER BY event_time ASC, id ASC", shipmentEventRowMapper, shipmentId);
   }
 
-  private <T> List<T> pageItems(List<T> items, int limit, int offset) {
-    int safeLimit = Math.max(0, limit);
-    int safeOffset = Math.max(0, offset);
-    if (safeLimit == 0 || safeOffset >= items.size()) {
-      return List.of();
+  private Map<Long, ShipmentRow> findShipmentsByOrderIds(List<Long> orderIds) {
+    Map<Long, ShipmentRow> shipmentsByOrderId = new LinkedHashMap<>();
+    if (orderIds.isEmpty()) {
+      return shipmentsByOrderId;
     }
-    int end = Math.min(items.size(), safeOffset + safeLimit);
-    return new ArrayList<>(items.subList(safeOffset, end));
+    String placeholders = String.join(",", Collections.nCopies(orderIds.size(), "?"));
+    List<ShipmentRow> shipments = jdbcTemplate.query(
+        "SELECT * FROM shipments WHERE order_id IN (" + placeholders + ")",
+        shipmentRowMapper,
+        orderIds.toArray()
+    );
+    for (ShipmentRow shipment : shipments) {
+      shipmentsByOrderId.put(shipment.orderId(), shipment);
+    }
+    return shipmentsByOrderId;
   }
 
   private long countRows(String table) {
@@ -766,8 +1386,7 @@ public class ZippyService {
     return count == null ? 0L : count;
   }
 
-  private Map<String, Object> orderHistoryToMap(OrderRow order) {
-    ShipmentRow shipment = findShipment(order.id());
+  private Map<String, Object> orderHistoryToMap(OrderRow order, ShipmentRow shipment) {
     Map<String, Object> response = new LinkedHashMap<>();
     response.put("zippyOrderId", order.zippyOrderId());
     response.put("merchantOrderId", order.merchantOrderId());
@@ -800,6 +1419,48 @@ public class ZippyService {
     }
   }
 
+  private Map<String, Object> findIdempotentReplay(String idempotencyKey, String requestHash) {
+    if (idempotencyKey == null) {
+      return null;
+    }
+    IdempotencyRecord existing = findIdempotencyRecord(idempotencyKey);
+    if (existing == null) {
+      return null;
+    }
+    if (!Objects.equals(existing.requestHash(), requestHash)) {
+      throw new ApiException(409, "Idempotency key reused with a different request");
+    }
+    return parseMap(existing.responseJson());
+  }
+
+  private void ensureIdempotencyLockRow(String idempotencyKey) {
+    isolatedTransactionTemplate.executeWithoutResult(status -> jdbcTemplate.update("""
+        MERGE INTO idempotency_locks (idempotency_key, created_at)
+        KEY(idempotency_key)
+        VALUES (?, ?)
+        """, idempotencyKey, now()));
+  }
+
+  private void lockIdempotencyKey(String idempotencyKey) {
+    String lockedKey = jdbcTemplate.queryForObject(
+        "SELECT idempotency_key FROM idempotency_locks WHERE idempotency_key = ? FOR UPDATE",
+        String.class,
+        idempotencyKey
+    );
+    if (!idempotencyKey.equals(lockedKey)) {
+      throw new IllegalStateException("Idempotency lock could not be acquired");
+    }
+  }
+
+  private void lockPaymentOperationKey(String idempotencyKey) {
+    if (idempotencyKey == null) {
+      return;
+    }
+    String lockKey = "PAYMENT:" + sha256(idempotencyKey);
+    ensureIdempotencyLockRow(lockKey);
+    lockIdempotencyKey(lockKey);
+  }
+
   private void storeIdempotencyRecord(String idempotencyKey, String requestHash, Map<String, Object> response, String now) {
     jdbcTemplate.update("""
         MERGE INTO idempotency_keys (idempotency_key, request_hash, response_json, created_at)
@@ -818,7 +1479,15 @@ public class ZippyService {
       throw new ApiException(422, "Unsupported status from " + shipment.carrierCode());
     }
 
-    ShipmentRow currentShipment = findShipment(shipment.orderId());
+    ShipmentRow currentShipment = shipment;
+    if (shipmentEventExists(currentShipment.id(), event.carrierEventId())) {
+      return Map.of(
+          "duplicate", true,
+          "status", currentShipment.currentStatus(),
+          "carrierEventId", event.carrierEventId()
+      );
+    }
+
     if (!allowedTransition(currentShipment.currentStatus(), event.normalizedStatus())) {
       if (!Objects.equals(currentShipment.currentStatus(), event.normalizedStatus())) {
         throw new ApiException(409, "Invalid status transition from " + currentShipment.currentStatus() + " to " + event.normalizedStatus());
@@ -855,37 +1524,66 @@ public class ZippyService {
   }
 
   private void settlePaymentsForTerminalOrder(long orderId, String shipmentStatus) {
-    if (STATUS_DELIVERY_FAILED.equals(shipmentStatus)) {
+    if (!STATUS_RTO.equals(shipmentStatus) && !STATUS_CANCELLED.equals(shipmentStatus)) {
       return;
     }
 
-    if (STATUS_RTO.equals(shipmentStatus)) {
-      jdbcTemplate.update("""
-          UPDATE payments
-          SET status = CASE
-                WHEN payment_method = 'COD' AND status = 'AWAITING_COLLECTION' THEN 'VOIDED'
-                WHEN payment_method = 'PREPAID' AND status = 'PENDING' THEN 'CANCELLED'
-                WHEN payment_method = 'PREPAID' AND status = 'SUCCEEDED' THEN 'REFUND_PENDING'
-                ELSE status
-              END,
-              updated_at = ?
-          WHERE order_id = ?
-            AND status IN ('AWAITING_COLLECTION', 'PENDING', 'SUCCEEDED')
-          """, now(), orderId);
-    } else if (STATUS_CANCELLED.equals(shipmentStatus)) {
-      jdbcTemplate.update("""
-          UPDATE payments
-          SET status = CASE
-                WHEN payment_method = 'COD' AND status = 'AWAITING_COLLECTION' THEN 'VOIDED'
-                WHEN payment_method = 'PREPAID' AND status = 'PENDING' THEN 'CANCELLED'
-                WHEN payment_method = 'PREPAID' AND status = 'SUCCEEDED' THEN 'REFUND_PENDING'
-                ELSE status
-              END,
-              updated_at = ?
-          WHERE order_id = ?
-            AND status IN ('AWAITING_COLLECTION', 'PENDING', 'SUCCEEDED')
-          """, now(), orderId);
+    List<PaymentRow> payments = jdbcTemplate.query("""
+        SELECT * FROM payments
+        WHERE order_id = ? AND status IN ('AWAITING_COLLECTION', 'PENDING', 'SUCCEEDED')
+        ORDER BY id
+        FOR UPDATE
+        """, paymentRowMapper, orderId);
+    String timestamp = now();
+    for (PaymentRow payment : payments) {
+      String resultingStatus;
+      String eventType;
+      if ("COD".equals(payment.paymentMethod()) && "AWAITING_COLLECTION".equals(payment.status())) {
+        resultingStatus = "VOIDED";
+        eventType = "AUTO_VOIDED";
+      } else if ("PREPAID".equals(payment.paymentMethod()) && "PENDING".equals(payment.status())) {
+        resultingStatus = "CANCELLED";
+        eventType = "AUTO_CANCELLED";
+      } else if ("PREPAID".equals(payment.paymentMethod()) && "SUCCEEDED".equals(payment.status())) {
+        resultingStatus = "REFUND_PENDING";
+        eventType = "REFUND_PENDING";
+      } else {
+        continue;
+      }
+      int updated = jdbcTemplate.update(
+          "UPDATE payments SET status = ?, updated_at = ? WHERE id = ? AND status = ?",
+          resultingStatus,
+          timestamp,
+          payment.id(),
+          payment.status()
+      );
+      requireTransition(updated, "Payment was changed by another operation");
+      recordPaymentTransaction(
+          payment,
+          eventType,
+          payment.status(),
+          resultingStatus,
+          payment.amount(),
+          "ZIPPY_SYSTEM",
+          "SHIPMENT-" + shipmentStatus + "-" + payment.paymentId(),
+          null,
+          "Shipment moved to " + shipmentStatus,
+          "ZIPPY_SYSTEM",
+          null,
+          null,
+          timestamp
+      );
     }
+  }
+
+  private boolean shipmentEventExists(long shipmentId, String carrierEventId) {
+    Long count = jdbcTemplate.queryForObject(
+        "SELECT COUNT(*) FROM shipment_events WHERE shipment_id = ? AND carrier_event_id = ?",
+        Long.class,
+        shipmentId,
+        carrierEventId
+    );
+    return count != null && count > 0;
   }
 
   private Map<String, Object> shipmentToMap(ShipmentRow shipment) {
@@ -948,23 +1646,47 @@ public class ZippyService {
     return sorted;
   }
 
-  private void scheduleAutomation(long shipmentId, String carrierCode) {
-    List<String> progression = List.of(STATUS_PICKED_UP, STATUS_IN_TRANSIT, STATUS_OUT_FOR_DELIVERY, STATUS_DELIVERED);
-    for (int i = 0; i < progression.size(); i++) {
-      String status = progression.get(i);
-      long delay = DEFAULT_AUTOMATION_DELAY_MS * (i + 1);
-      carrierExecutor.submit(() -> {
-        sleep(delay);
-        ShipmentRow shipment = findShipmentById(shipmentId);
-        if (shipment == null) {
-          return;
-        }
-        JsonNode payload = buildWebhookPayload(shipment, status);
-        try {
-          handleWebhook(carrierCode, payload);
-        } catch (Exception ignored) {
+  private void scheduleAutomationAfterCommit(long shipmentId, String carrierCode) {
+    Runnable scheduling = () -> scheduleAutomation(shipmentId, carrierCode);
+    if (TransactionSynchronizationManager.isSynchronizationActive()) {
+      TransactionSynchronizationManager.registerSynchronization(new TransactionSynchronization() {
+        @Override
+        public void afterCommit() {
+          scheduling.run();
         }
       });
+    } else {
+      scheduling.run();
+    }
+  }
+
+  private void scheduleAutomation(long shipmentId, String carrierCode) {
+    try {
+      automationScheduler.schedule(() -> {
+        boolean shouldContinue = false;
+        try {
+          shouldContinue = Boolean.TRUE.equals(transactionTemplate.execute(ignored -> {
+            ShipmentRow shipment = findShipmentById(shipmentId);
+            if (shipment == null) {
+              return false;
+            }
+            String nextStatus = nextAutomatedStatus(shipment.currentStatus());
+            if (nextStatus == null) {
+              return false;
+            }
+            JsonNode payload = buildWebhookPayload(shipment, nextStatus);
+            handleWebhook(carrierCode, payload);
+            return !STATUS_DELIVERED.equals(nextStatus) && !STATUS_RTO.equals(nextStatus);
+          }));
+        } catch (Exception exception) {
+          LOGGER.debug("Automated shipment update was skipped: {}", exception.getMessage());
+        }
+        if (shouldContinue) {
+          scheduleAutomation(shipmentId, carrierCode);
+        }
+      }, DEFAULT_AUTOMATION_DELAY_MS, TimeUnit.MILLISECONDS);
+    } catch (RejectedExecutionException exception) {
+      LOGGER.warn("Shipment automation task was rejected for shipment {}", shipmentId);
     }
   }
 
@@ -976,17 +1698,39 @@ public class ZippyService {
     }
   }
 
-  private ShipmentRow findShipmentByTracking(String trackingKey, String trackingField) {
+  private ShipmentRow findShipmentByTracking(
+      String carrierCode,
+      String trackingKey,
+      String trackingField
+  ) {
     String column = "carrier_shipment_id".equals(trackingField) ? "carrier_shipment_id" : "tracking_number";
-    try {
-      return jdbcTemplate.queryForObject("SELECT * FROM shipments WHERE " + column + " = ?", shipmentRowMapper, trackingKey);
-    } catch (Exception exception) {
-      return null;
-    }
+    List<ShipmentRow> shipments = jdbcTemplate.query(
+        "SELECT * FROM shipments WHERE carrier_code = ? AND " + column + " = ?",
+        shipmentRowMapper,
+        carrierCode,
+        trackingKey
+    );
+    return shipments.isEmpty() ? null : shipments.getFirst();
+  }
+
+  private ShipmentRow findShipmentByTrackingForUpdate(
+      String carrierCode,
+      String trackingKey,
+      String trackingField
+  ) {
+    String column = "carrier_shipment_id".equals(trackingField) ? "carrier_shipment_id" : "tracking_number";
+    List<ShipmentRow> shipments = jdbcTemplate.query(
+        "SELECT * FROM shipments WHERE carrier_code = ? AND " + column + " = ? FOR UPDATE",
+        shipmentRowMapper,
+        carrierCode,
+        trackingKey
+    );
+    return shipments.isEmpty() ? null : shipments.getFirst();
   }
 
   private Map<String, Object> initialWebhookPayloadData(ShipmentRow shipment, OrderRow order) {
     Map<String, Object> payload = new LinkedHashMap<>();
+    payload.put("event_id", mockEventId(shipment, STATUS_SHIPMENT_CREATED));
     if ("FASTSHIP".equals(shipment.carrierCode())) {
       payload.put("shipment_id", shipment.carrierShipmentId());
       payload.put("tracking_number", shipment.trackingNumber());
@@ -1010,6 +1754,7 @@ public class ZippyService {
   private JsonNode buildWebhookPayload(ShipmentRow shipment, String normalizedStatus) {
     Map<String, Object> payload = new LinkedHashMap<>();
     String now = now();
+    payload.put("event_id", mockEventId(shipment, normalizedStatus));
     if ("FASTSHIP".equals(shipment.carrierCode())) {
       payload.put("shipment_id", shipment.carrierShipmentId());
       payload.put("tracking_number", shipment.trackingNumber());
@@ -1059,39 +1804,128 @@ public class ZippyService {
     return objectMapper.valueToTree(payload);
   }
 
+  private String mockEventId(ShipmentRow shipment, String status) {
+    return shipment.carrierCode() + "-" + shipment.id() + "-" + status + "-" + UUID.randomUUID();
+  }
+
   private CarrierEvent mapWebhook(String carrierCode, JsonNode payload) {
+    if (payload == null || !payload.isObject()) {
+      throw new ApiException(400, "Invalid webhook payload", List.of("JSON body must be an object"));
+    }
     return switch (carrierCode) {
-      case "FASTSHIP" -> new CarrierEvent(
-          payload.path("shipment_id").asText(),
-          "carrier_shipment_id",
-          payload.path("event_code").asText(),
-          payload.path("event_code").asText(),
-          mapFastshipStatus(payload.path("event_code").asText()),
-          payload.path("event_description").asText(),
-          payload.path("location").asText(null),
-          payload.path("event_time").asText()
-      );
-      case "QUICKEXPRESS" -> new CarrierEvent(
-          payload.path("awb").asText(),
-          "tracking_number",
-          payload.path("event").path("type").asText(),
-          payload.path("event").path("type").asText(),
-          mapQuickStatus(payload.path("event").path("type").asText()),
-          payload.path("event").path("message").asText(),
-          payload.path("facility").path("city").asText(null),
-          payload.path("event").path("occurredAt").asText()
-      );
-      default -> new CarrierEvent(
-          payload.path("trackingCode").asText(),
-          "tracking_number",
-          String.valueOf(payload.path("statusId").asInt()),
-          String.valueOf(payload.path("statusId").asInt()),
-          mapReliableStatus(payload.path("statusId").asInt()),
-          payload.path("statusText").asText(),
-          payload.path("proofOfDelivery").path("deliveryLocation").asText(null),
-          payload.path("updatedOn").asText()
-      );
+      case "FASTSHIP" -> mapFastshipWebhook(payload);
+      case "QUICKEXPRESS" -> mapQuickexpressWebhook(payload);
+      default -> mapReliableWebhook(payload);
     };
+  }
+
+  private CarrierEvent mapFastshipWebhook(JsonNode payload) {
+    String status = requiredText(payload.path("event_code"), "event_code", 32);
+    String eventTime = requiredEventTime(payload.path("event_time"), "event_time");
+    return new CarrierEvent(
+        requiredText(payload.path("shipment_id"), "shipment_id", 64),
+        "carrier_shipment_id",
+        carrierEventId("FASTSHIP", status, eventTime, firstText(payload, "event_id", "eventId")),
+        status,
+        mapFastshipStatus(status),
+        requiredText(payload.path("event_description"), "event_description", 255),
+        optionalText(payload.path("location"), "location", 120),
+        eventTime
+    );
+  }
+
+  private CarrierEvent mapQuickexpressWebhook(JsonNode payload) {
+    JsonNode eventNode = payload.path("event");
+    if (!eventNode.isObject()) {
+      throw new ApiException(400, "Invalid webhook payload", List.of("event must be an object"));
+    }
+    String status = requiredText(eventNode.path("type"), "event.type", 32);
+    String eventTime = requiredEventTime(eventNode.path("occurredAt"), "event.occurredAt");
+    String explicitEventId = firstText(payload, "event_id", "eventId");
+    if (explicitEventId == null) {
+      explicitEventId = optionalText(eventNode.path("id"), "event.id", 120);
+    }
+    return new CarrierEvent(
+        requiredText(payload.path("awb"), "awb", 64),
+        "tracking_number",
+        carrierEventId("QUICKEXPRESS", status, eventTime, explicitEventId),
+        status,
+        mapQuickStatus(status),
+        requiredText(eventNode.path("message"), "event.message", 255),
+        optionalText(payload.path("facility").path("city"), "facility.city", 120),
+        eventTime
+    );
+  }
+
+  private CarrierEvent mapReliableWebhook(JsonNode payload) {
+    JsonNode statusNode = payload.path("statusId");
+    if (!statusNode.isIntegralNumber() || !statusNode.canConvertToInt() || statusNode.asInt() <= 0) {
+      throw new ApiException(400, "Invalid webhook payload", List.of("statusId must be a positive integer"));
+    }
+    int statusId = statusNode.asInt();
+    String status = String.valueOf(statusId);
+    String eventTime = requiredEventTime(payload.path("updatedOn"), "updatedOn");
+    return new CarrierEvent(
+        requiredText(payload.path("trackingCode"), "trackingCode", 64),
+        "tracking_number",
+        carrierEventId("RELIABLE", status, eventTime, firstText(payload, "event_id", "eventId")),
+        status,
+        mapReliableStatus(statusId),
+        requiredText(payload.path("statusText"), "statusText", 255),
+        optionalText(payload.path("proofOfDelivery").path("deliveryLocation"), "proofOfDelivery.deliveryLocation", 120),
+        eventTime
+    );
+  }
+
+  private String requiredText(JsonNode node, String field, int maxLength) {
+    String value = optionalText(node, field, maxLength);
+    if (value == null) {
+      throw new ApiException(400, "Invalid webhook payload", List.of(field + " is required"));
+    }
+    return value;
+  }
+
+  private String optionalText(JsonNode node, String field, int maxLength) {
+    if (node == null || node.isMissingNode() || node.isNull()) {
+      return null;
+    }
+    if (!node.isTextual()) {
+      throw new ApiException(400, "Invalid webhook payload", List.of(field + " must be a string"));
+    }
+    String value = node.asText().trim();
+    if (value.isEmpty()) {
+      return null;
+    }
+    if (value.length() > maxLength) {
+      throw new ApiException(400, "Invalid webhook payload", List.of(field + " exceeds " + maxLength + " characters"));
+    }
+    return value;
+  }
+
+  private String firstText(JsonNode payload, String... fields) {
+    for (String field : fields) {
+      String value = optionalText(payload.path(field), field, 120);
+      if (value != null) {
+        return value;
+      }
+    }
+    return null;
+  }
+
+  private String requiredEventTime(JsonNode node, String field) {
+    String value = requiredText(node, field, 40);
+    try {
+      return OffsetDateTime.parse(value).toInstant().toString();
+    } catch (DateTimeParseException exception) {
+      throw new ApiException(400, "Invalid webhook payload", List.of(field + " must be an ISO-8601 timestamp"));
+    }
+  }
+
+  private String carrierEventId(String carrier, String status, String eventTime, String explicitEventId) {
+    if (explicitEventId != null) {
+      return explicitEventId;
+    }
+    return carrier + ":" + status + ":" + eventTime;
   }
 
   private Map<String, Object> fastShipRate(OrderContext order) {
@@ -1136,48 +1970,104 @@ public class ZippyService {
 
   private Map<String, Object> reliableRates(OrderContext order) {
     BigDecimal cod = "COD".equalsIgnoreCase(order.paymentMode()) ? money(30) : ZERO;
+    BigDecimal surfaceBase = money(95);
+    BigDecimal surfaceHandling = money(10);
+    BigDecimal surfaceTax = tax(surfaceBase.add(surfaceHandling).add(cod));
+    BigDecimal airBase = money(130);
+    BigDecimal airHandling = money(12);
+    BigDecimal airTax = tax(airBase.add(airHandling).add(cod));
     return Map.of(
         "code", 200,
         "data", List.of(
             Map.of(
                 "id", "RC-SURFACE",
                 "name", "Reliable Surface",
-                "rate", Map.of("base", money(95), "handling", money(10), "cashCollectionFee", cod, "taxAmount", money(24.30), "grandTotal", money(95).add(money(10)).add(cod).add(money(24.30))),
+                "rate", Map.of(
+                    "base", surfaceBase,
+                    "handling", surfaceHandling,
+                    "cashCollectionFee", cod,
+                    "taxAmount", surfaceTax,
+                    "grandTotal", surfaceBase.add(surfaceHandling).add(cod).add(surfaceTax)
+                ),
                 "eta", "4-5 business days"
             ),
             Map.of(
                 "id", "RC-AIR",
                 "name", "Reliable Air",
-                "rate", Map.of("base", money(130), "handling", money(12), "cashCollectionFee", cod, "taxAmount", money(30.96), "grandTotal", money(130).add(money(12)).add(cod).add(money(30.96))),
+                "rate", Map.of(
+                    "base", airBase,
+                    "handling", airHandling,
+                    "cashCollectionFee", cod,
+                    "taxAmount", airTax,
+                    "grandTotal", airBase.add(airHandling).add(cod).add(airTax)
+                ),
                 "eta", "2-3 business days"
             )
         )
     );
   }
 
+  private BigDecimal tax(BigDecimal taxableAmount) {
+    return taxableAmount.multiply(BigDecimal.valueOf(0.18)).setScale(2, RoundingMode.HALF_UP);
+  }
+
   private Map<String, Object> fastShipCreateShipment(OrderRow order, ShippingQuote quote) {
+    long offset = mockOrderOffset(order);
+    String shipmentId = mockIdentifier("FS-", 700001L, offset, 6);
+    String trackingNumber = mockIdentifier("FST", 123456789L, offset, 9);
     return Map.of(
         "success", true,
-        "shipment_id", "FS-700001",
-        "tracking_number", "FST123456789",
-        "label_url", "http://mock-fastship/labels/FST123456789.pdf",
+        "shipment_id", shipmentId,
+        "tracking_number", trackingNumber,
+        "label_url", "http://mock-fastship/labels/" + trackingNumber + ".pdf",
         "status", "BOOKED"
     );
   }
 
   private Map<String, Object> quickExpressCreateShipment(OrderRow order, ShippingQuote quote) {
+    long offset = mockOrderOffset(order);
     return Map.of(
         "bookingStatus", "CONFIRMED",
-        "booking", Map.of("bookingId", "QE-B-800001", "awb", "QE987654321", "currentState", "SHIPMENT_CREATED")
+        "booking", Map.of(
+            "bookingId", mockIdentifier("QE-B-", 800001L, offset, 6),
+            "awb", mockIdentifier("QE", 987654321L, offset, 9),
+            "currentState", "SHIPMENT_CREATED"
+        )
     );
   }
 
   private Map<String, Object> reliableShipment(OrderRow order, ShippingQuote quote) {
+    long offset = mockOrderOffset(order);
     return Map.of(
         "result", "ACCEPTED",
-        "deliveryOrder", Map.of("id", "RC-DO-600001", "trackingCode", "RC1122334455"),
+        "deliveryOrder", Map.of(
+            "id", mockIdentifier("RC-DO-", 600001L, offset, 6),
+            "trackingCode", mockIdentifier("RC", 1122334455L, offset, 10)
+        ),
         "message", "Shipment successfully registered"
     );
+  }
+
+  private long mockOrderOffset(OrderRow order) {
+    String orderId = order.zippyOrderId();
+    int separator = orderId.lastIndexOf('-');
+    if (separator >= 0 && separator + 1 < orderId.length()) {
+      try {
+        return Math.max(0L, Long.parseLong(orderId.substring(separator + 1)) - 10001L);
+      } catch (NumberFormatException ignored) {
+        // Fall back to the stable database identity below.
+      }
+    }
+    return Math.max(0L, order.id() - 1L);
+  }
+
+  private long mockPayloadOffset(JsonNode payload) {
+    UUID stableId = UUID.nameUUIDFromBytes(payload.toString().getBytes(StandardCharsets.UTF_8));
+    return Math.floorMod(stableId.getMostSignificantBits() ^ stableId.getLeastSignificantBits(), 900_000L);
+  }
+
+  private String mockIdentifier(String prefix, long base, long offset, int minimumDigits) {
+    return prefix + String.format("%0" + minimumDigits + "d", base + offset);
   }
 
   private ShippingQuote fastShipQuote(OrderRow order) {
@@ -1282,15 +2172,36 @@ public class ZippyService {
     }
   }
 
-  private String nextOrderId() {
-    synchronized (sequenceLock) {
-      String value = jdbcTemplate.queryForObject("SELECT meta_value FROM app_meta WHERE meta_key = ?", String.class, "order_sequence");
-      long next = value == null ? 10001L : Long.parseLong(value) + 1L;
-      jdbcTemplate.update("""
-          MERGE INTO app_meta (meta_key, meta_value) KEY(meta_key) VALUES (?, ?)
-          """, "order_sequence", String.valueOf(next));
-      return "ZPY-ORD-" + next;
+  private OrderRow findOrderByIdForUpdate(long orderId) {
+    try {
+      return jdbcTemplate.queryForObject(
+          "SELECT * FROM orders WHERE id = ? FOR UPDATE",
+          orderRowMapper,
+          orderId
+      );
+    } catch (Exception exception) {
+      throw new ApiException(404, "Order not found");
     }
+  }
+
+  private String reserveNextOrderId() {
+    return isolatedTransactionTemplate.execute(status -> {
+      String value = jdbcTemplate.queryForObject(
+          "SELECT meta_value FROM app_meta WHERE meta_key = ? FOR UPDATE",
+          String.class,
+          "order_sequence"
+      );
+      long next = value == null ? 10001L : Long.parseLong(value) + 1L;
+      int updated = jdbcTemplate.update(
+          "UPDATE app_meta SET meta_value = ? WHERE meta_key = ?",
+          String.valueOf(next),
+          "order_sequence"
+      );
+      if (updated != 1) {
+        throw new IllegalStateException("Order sequence is not initialized");
+      }
+      return "ZPY-ORD-" + next;
+    });
   }
 
   private String normalizeIdempotencyKey(String idempotencyKey) {
@@ -1298,21 +2209,68 @@ public class ZippyService {
       return null;
     }
     String normalized = idempotencyKey.trim();
+    if (normalized.length() > 128) {
+      throw new ApiException(400, "Idempotency-Key must not exceed 128 characters");
+    }
     return normalized.isEmpty() ? null : normalized;
   }
 
+  private int exactWeightGrams(BigDecimal weightGrams) {
+    try {
+      return weightGrams.intValueExact();
+    } catch (ArithmeticException exception) {
+      throw new ApiException(422, "package.weightGrams must be a whole number within the supported range");
+    }
+  }
+
   private String hashOrderRequest(OrderCreateRequest request) {
+    return sha256(toJson(request));
+  }
+
+  private String hashPaymentIntentRequest(CreatePaymentIntentRequest request) {
+    return sha256(
+        request.getOrderId().trim()
+            + "|" + request.getAmount().setScale(2, RoundingMode.HALF_UP).toPlainString()
+            + "|" + request.getCurrency().trim().toUpperCase()
+    );
+  }
+
+  private String hashPaymentAction(String eventType, String paymentId, ActionAudit audit) {
+    return sha256(String.join(
+        "|",
+        eventType,
+        paymentId,
+        Objects.toString(audit.provider(), ""),
+        Objects.toString(audit.reference(), ""),
+        Objects.toString(audit.reconciliationReference(), ""),
+        Objects.toString(audit.reason(), "")
+    ));
+  }
+
+  private String sha256(String value) {
     try {
       MessageDigest digest = MessageDigest.getInstance("SHA-256");
-      byte[] hash = digest.digest(toJson(request).getBytes(StandardCharsets.UTF_8));
+      byte[] hash = digest.digest(value.getBytes(StandardCharsets.UTF_8));
       StringBuilder builder = new StringBuilder();
-      for (byte value : hash) {
-        builder.append(String.format("%02x", value));
+      for (byte hashByte : hash) {
+        builder.append(String.format("%02x", hashByte));
       }
       return builder.toString();
     } catch (NoSuchAlgorithmException exception) {
-      throw new ApiException(500, "Unable to hash order request");
+      throw new ApiException(500, "Unable to hash request");
     }
+  }
+
+  private String currentActor() {
+    Authentication authentication = SecurityContextHolder.getContext().getAuthentication();
+    if (authentication != null
+        && authentication.isAuthenticated()
+        && !(authentication instanceof AnonymousAuthenticationToken)
+        && authentication.getName() != null
+        && !authentication.getName().isBlank()) {
+      return authentication.getName();
+    }
+    return "LOCAL_OPERATOR";
   }
 
   private ShippingQuote parseQuote(String json) {
@@ -1456,6 +2414,7 @@ public class ZippyService {
       Thread.sleep(millis);
     } catch (InterruptedException interruptedException) {
       Thread.currentThread().interrupt();
+      throw new CancellationException("Carrier request interrupted");
     }
   }
 
@@ -1467,10 +2426,26 @@ public class ZippyService {
   }
 
   private long longValue(Object value) {
-    if (value instanceof Number number) {
-      return number.longValue();
+    try {
+      if (value instanceof Number number) {
+        return number.longValue();
+      }
+      return Long.parseLong(String.valueOf(value));
+    } catch (RuntimeException exception) {
+      throw new ApiException(400, "Runtime delay must be an integer");
     }
-    return Long.parseLong(String.valueOf(value));
+  }
+
+  private long runtimeDelay(Object value, String field) {
+    long delay = longValue(value);
+    if (delay < 0 || delay > MAX_RUNTIME_DELAY_MS) {
+      throw new ApiException(
+          400,
+          "Invalid runtime delay",
+          List.of(field + " must be between 0 and " + MAX_RUNTIME_DELAY_MS)
+      );
+    }
+    return delay;
   }
 
   private int[] parseEta(String eta) {
@@ -1536,6 +2511,12 @@ public class ZippyService {
       case STATUS_DELIVERED, STATUS_RTO, STATUS_CANCELLED -> false;
       default -> false;
     };
+  }
+
+  private boolean isTerminalOrderStatus(String status) {
+    return STATUS_DELIVERED.equals(status)
+        || STATUS_RTO.equals(status)
+        || STATUS_CANCELLED.equals(status);
   }
 
   private record OrderContext(long weightGrams, String paymentMode, BigDecimal invoiceValue) {
@@ -1627,6 +2608,11 @@ public class ZippyService {
       String createdAt
   ) {}
 
+  private record PaymentOperationContext(
+      OrderRow order,
+      PaymentRow payment
+  ) {}
+
   private record PaymentRow(
       long id,
       String paymentId,
@@ -1640,9 +2626,96 @@ public class ZippyService {
       String failureCode,
       String failureReason,
       BigDecimal refundedAmount,
+      String provider,
+      String providerReference,
+      String reconciliationReference,
+      String refundReference,
+      String refundReconciliationReference,
+      String capturedAt,
+      String collectedAt,
+      String refundedAt,
       String createdAt,
       String updatedAt
   ) {}
+
+  private record PaymentTransactionRow(
+      long id,
+      String transactionId,
+      long paymentDatabaseId,
+      String paymentId,
+      long orderDatabaseId,
+      String orderId,
+      String eventType,
+      String previousStatus,
+      String resultingStatus,
+      BigDecimal amount,
+      String currency,
+      String provider,
+      String providerReference,
+      String reconciliationReference,
+      String reason,
+      String actor,
+      String idempotencyKey,
+      String requestHash,
+      String responseJson,
+      String createdAt
+  ) {}
+
+  private record ActionAudit(
+      String provider,
+      String reference,
+      String reconciliationReference,
+      String reason
+  ) {}
+
+  private record ReportFilter(
+      LocalDate from,
+      LocalDate to,
+      Instant fromInclusive,
+      Instant toExclusive,
+      String status,
+      String method,
+      String carrier,
+      String search
+  ) {}
+
+  private record SqlFilter(String clause, List<Object> arguments) {}
+
+  private record CashTotals(BigDecimal grossCollected, BigDecimal refunds) {}
+
+  private record ShipmentTotals(BigDecimal shippingCost, long costedCount, long activeCount) {}
+
+  private record PaymentBuckets(
+      long pendingCount,
+      BigDecimal pendingAmount,
+      long failedCount,
+      BigDecimal failedAmount,
+      long voidedCount,
+      BigDecimal voidedAmount,
+      long codCount,
+      BigDecimal codAmount
+  ) {
+    private static PaymentBuckets empty() {
+      return new PaymentBuckets(0, ZERO, 0, ZERO, 0, ZERO, 0, ZERO);
+    }
+  }
+
+  private static final class BreakdownTotals {
+    private long count;
+    private BigDecimal totalAmount = ZERO;
+    private BigDecimal gross = ZERO;
+    private BigDecimal refunds = ZERO;
+    private BigDecimal outstanding = ZERO;
+  }
+
+  private static final class CarrierTotals {
+    private long shipments;
+    private long activeShipments;
+    private BigDecimal shippingCost = ZERO;
+    private BigDecimal gross = ZERO;
+    private BigDecimal refunds = ZERO;
+    private BigDecimal outstanding = ZERO;
+  }
 
   private final RowMapper<PaymentRow> paymentRowMapper = (rs, rowNum) -> new PaymentRow(
       rs.getLong("id"),
@@ -1657,24 +2730,75 @@ public class ZippyService {
       rs.getString("failure_code"),
       rs.getString("failure_reason"),
       defaultDecimal(rs.getBigDecimal("refunded_amount")),
+      rs.getString("provider"),
+      rs.getString("provider_reference"),
+      rs.getString("reconciliation_reference"),
+      rs.getString("refund_reference"),
+      rs.getString("refund_reconciliation_reference"),
+      rs.getString("captured_at"),
+      rs.getString("collected_at"),
+      rs.getString("refunded_at"),
       rs.getString("created_at"),
       rs.getString("updated_at")
   );
 
+  private final RowMapper<PaymentTransactionRow> paymentTransactionRowMapper = (rs, rowNum) ->
+      new PaymentTransactionRow(
+          rs.getLong("id"),
+          rs.getString("transaction_id"),
+          rs.getLong("payment_database_id"),
+          rs.getString("payment_id"),
+          rs.getLong("order_database_id"),
+          rs.getString("zippy_order_id"),
+          rs.getString("event_type"),
+          rs.getString("previous_status"),
+          rs.getString("resulting_status"),
+          defaultDecimal(rs.getBigDecimal("amount")),
+          rs.getString("currency"),
+          rs.getString("provider"),
+          rs.getString("provider_reference"),
+          rs.getString("reconciliation_reference"),
+          rs.getString("reason"),
+          rs.getString("actor"),
+          rs.getString("idempotency_key"),
+          rs.getString("request_hash"),
+          rs.getString("response_json"),
+          rs.getString("created_at")
+      );
+
   @Transactional
-  public PaymentIntentResponse createPaymentIntent(CreatePaymentIntentRequest request) {
-    OrderRow order = findOrderByZippyId(request.getOrderId());
+  public PaymentIntentResponse createPaymentIntent(CreatePaymentIntentRequest request, String idempotencyKey) {
+    String normalizedKey = normalizeIdempotencyKey(idempotencyKey);
+    String requestHash = normalizedKey == null ? null : hashPaymentIntentRequest(request);
+    lockPaymentOperationKey(normalizedKey);
+    PaymentIntentResponse replay = findPaymentOperationReplay(
+        null,
+        normalizedKey,
+        "INTENT_CREATED",
+        requestHash
+    );
+    if (replay != null) {
+      return replay;
+    }
+
+    OrderRow order = findOrderByZippyOrderIdForUpdate(request.getOrderId());
     if (!"PREPAID".equalsIgnoreCase(order.paymentType())) {
       throw new ApiException(409, "Payment intents are only available for prepaid orders");
+    }
+    if (isTerminalOrderStatus(order.orderStatus())) {
+      throw new ApiException(409, "Payment cannot be created for an order in status " + order.orderStatus());
     }
 
     ShipmentRow shipment = findShipment(order.id());
     if (shipment == null) {
       throw new ApiException(409, "Select a carrier before creating a payment");
     }
+    if (isTerminalOrderStatus(shipment.currentStatus())) {
+      throw new ApiException(409, "Payment cannot be created for a shipment in status " + shipment.currentStatus());
+    }
 
     String currency = request.getCurrency().trim().toUpperCase();
-    if (!List.of("INR", "USD").contains(currency)) {
+    if (!"INR".equals(currency)) {
       throw new ApiException(422, "Unsupported currency: " + currency);
     }
 
@@ -1683,30 +2807,68 @@ public class ZippyService {
       throw new ApiException(422, "Payment amount must match the selected shipment charge in INR");
     }
 
-    PaymentRow existingPending = findPendingPaymentForOrder(order.id());
-    if (existingPending != null) {
-      if (existingPending.amount().compareTo(amount) != 0 || !currency.equals(existingPending.currency())) {
+    PaymentRow existingPayment = findBlockingPrepaidPaymentForOrder(order.id());
+    if (existingPayment != null) {
+      if ("PENDING".equals(existingPayment.status())
+          && existingPayment.amount().compareTo(amount) == 0
+          && currency.equals(existingPayment.currency())) {
+        return toPaymentIntentResponse(existingPayment);
+      }
+      if ("PENDING".equals(existingPayment.status())) {
         throw new ApiException(409, "A payment intent already exists for this order");
       }
-      return toPaymentIntentResponse(existingPending);
+      throw new ApiException(409, "This order already has a completed or active payment outcome");
     }
 
-    String paymentId = "PAY-" + UUID.randomUUID().toString().substring(0, 8).toUpperCase();
+    String paymentId = "PAY-" + UUID.randomUUID().toString().replace("-", "").toUpperCase();
     String timestamp = now();
+    String provider = "ZIPPY_CHECKOUT";
+    String providerReference = paymentId;
     jdbcTemplate.update("""
         INSERT INTO payments (
           payment_id, order_id, zippy_order_id, amount, currency, status,
-          payment_method, collection_stage, created_at, updated_at
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+          payment_method, collection_stage, provider, provider_reference, created_at, updated_at
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         """,
-        paymentId, order.id(), order.zippyOrderId(), amount, currency, "PENDING", "PREPAID", "CHECKOUT", timestamp, timestamp);
+        paymentId, order.id(), order.zippyOrderId(), amount, currency, "PENDING", "PREPAID", "CHECKOUT",
+        provider, providerReference, timestamp, timestamp);
 
-    return toPaymentIntentResponse(requirePayment(paymentId));
+    PaymentRow created = requirePayment(paymentId);
+    recordPaymentTransaction(
+        created,
+        "INTENT_CREATED",
+        null,
+        "PENDING",
+        created.amount(),
+        provider,
+        providerReference,
+        null,
+        "Prepaid payment intent created",
+        currentActor(),
+        normalizedKey,
+        requestHash,
+        timestamp
+    );
+    return toPaymentIntentResponse(created);
   }
 
   @Transactional
-  public PaymentIntentResponse confirmPayment(String paymentId) {
-    PaymentRow payment = requirePayment(paymentId);
+  public PaymentIntentResponse confirmPayment(
+      String paymentId,
+      PaymentActionRequest request,
+      String idempotencyKey
+  ) {
+    String normalizedKey = normalizeIdempotencyKey(idempotencyKey);
+    lockPaymentOperationKey(normalizedKey);
+    PaymentOperationContext context = lockPaymentAndOrder(paymentId);
+    PaymentRow payment = context.payment();
+    ActionAudit audit = actionAudit(request, payment, "ZIPPY_OPERATIONS", "CAPTURE-", "Payment captured by operations");
+    String requestHash = normalizedKey == null ? null : hashPaymentAction("CAPTURED", paymentId, audit);
+    PaymentIntentResponse replay = findPaymentOperationReplay(
+        paymentId, normalizedKey, "CAPTURED", requestHash);
+    if (replay != null) {
+      return replay;
+    }
     if (!"PREPAID".equals(payment.paymentMethod())) {
       throw new ApiException(409, "Only prepaid payments can be confirmed");
     }
@@ -1716,53 +2878,189 @@ public class ZippyService {
     if (!"PENDING".equals(payment.status())) {
       throw new ApiException(409, "Payment cannot be confirmed from status " + payment.status());
     }
+    if (isTerminalOrderStatus(context.order().orderStatus())) {
+      throw new ApiException(409, "Payment cannot be confirmed for an order in status " + context.order().orderStatus());
+    }
+    ShipmentRow shipment = findShipmentForUpdate(context.order().id());
+    if (shipment == null
+        || isTerminalOrderStatus(shipment.currentStatus())
+        || !"INR".equals(payment.currency())
+        || payment.amount().compareTo(shipment.quotedAmount()) != 0) {
+      throw new ApiException(409, "Payment amount no longer matches the selected shipment charge");
+    }
 
     String timestamp = now();
-    jdbcTemplate.update("UPDATE payments SET status = ?, updated_at = ? WHERE payment_id = ?",
-        "SUCCEEDED", timestamp, paymentId);
-    return toPaymentIntentResponse(requirePayment(paymentId));
+    int updated = jdbcTemplate.update("""
+        UPDATE payments
+        SET status = ?, provider = ?, provider_reference = ?, reconciliation_reference = ?,
+            captured_at = ?, updated_at = ?
+        WHERE payment_id = ? AND status = 'PENDING'
+        """, "SUCCEEDED", audit.provider(), audit.reference(), audit.reconciliationReference(),
+        timestamp, timestamp, paymentId);
+    requireTransition(updated, "Payment was changed by another operation");
+    PaymentRow confirmed = requirePayment(paymentId);
+    recordPaymentTransaction(
+        confirmed, "CAPTURED", "PENDING", "SUCCEEDED", confirmed.amount(), audit.provider(),
+        audit.reference(), audit.reconciliationReference(), audit.reason(), currentActor(), normalizedKey,
+        requestHash, timestamp);
+    return toPaymentIntentResponse(confirmed);
   }
 
   @Transactional
-  public PaymentIntentResponse failPayment(String paymentId, PaymentFailureRequest request) {
-    PaymentRow payment = requirePayment(paymentId);
+  public PaymentIntentResponse failPayment(
+      String paymentId,
+      PaymentFailureRequest request,
+      String idempotencyKey
+  ) {
+    String normalizedKey = normalizeIdempotencyKey(idempotencyKey);
+    lockPaymentOperationKey(normalizedKey);
+    PaymentOperationContext context = lockPaymentAndOrder(paymentId);
+    PaymentRow payment = context.payment();
+    String code = request == null || request.code() == null || request.code().isBlank()
+        ? "PAYMENT_DECLINED" : request.code().trim();
+    String reason = request == null || request.reason() == null || request.reason().isBlank()
+        ? "Payment was declined" : request.reason().trim();
+    String reference = request == null || request.reference() == null || request.reference().isBlank()
+        ? "FAIL-" + payment.paymentId() : request.reference().trim();
+    ActionAudit audit = new ActionAudit(
+        defaultString(payment.provider(), "ZIPPY_OPERATIONS"),
+        reference,
+        null,
+        code + ": " + reason
+    );
+    String requestHash = normalizedKey == null ? null : hashPaymentAction("FAILED", paymentId, audit);
+    PaymentIntentResponse replay = findPaymentOperationReplay(
+        paymentId, normalizedKey, "FAILED", requestHash);
+    if (replay != null) {
+      return replay;
+    }
+    if ("FAILED".equals(payment.status())
+        && Objects.equals(payment.failureCode(), code)
+        && Objects.equals(payment.failureReason(), reason)) {
+      return toPaymentIntentResponse(payment);
+    }
     if (!"PREPAID".equals(payment.paymentMethod()) || !"PENDING".equals(payment.status())) {
       throw new ApiException(409, "Only pending prepaid payments can be failed");
     }
+    if (isTerminalOrderStatus(context.order().orderStatus())) {
+      throw new ApiException(409, "Payment cannot be failed for an order in status " + context.order().orderStatus());
+    }
     String timestamp = now();
-    String code = request == null || request.code() == null || request.code().isBlank() ? "PAYMENT_DECLINED" : request.code().trim();
-    String reason = request == null || request.reason() == null || request.reason().isBlank() ? "Payment was declined" : request.reason().trim();
-    jdbcTemplate.update("UPDATE payments SET status = ?, failure_code = ?, failure_reason = ?, updated_at = ? WHERE payment_id = ?",
-        "FAILED", code, reason, timestamp, paymentId);
-    return toPaymentIntentResponse(requirePayment(paymentId));
+    int updated = jdbcTemplate.update("""
+        UPDATE payments
+        SET status = ?, failure_code = ?, failure_reason = ?, updated_at = ?
+        WHERE payment_id = ? AND status = 'PENDING'
+        """, "FAILED", code, reason, timestamp, paymentId);
+    requireTransition(updated, "Payment was changed by another operation");
+    PaymentRow failed = requirePayment(paymentId);
+    recordPaymentTransaction(
+        failed, "FAILED", "PENDING", "FAILED", failed.amount(), audit.provider(), audit.reference(), null,
+        audit.reason(), currentActor(), normalizedKey, requestHash, timestamp);
+    return toPaymentIntentResponse(failed);
   }
 
   @Transactional
-  public PaymentIntentResponse cancelPayment(String paymentId) {
-    PaymentRow payment = requirePayment(paymentId);
+  public PaymentIntentResponse cancelPayment(
+      String paymentId,
+      PaymentActionRequest request,
+      String idempotencyKey
+  ) {
+    String normalizedKey = normalizeIdempotencyKey(idempotencyKey);
+    lockPaymentOperationKey(normalizedKey);
+    PaymentOperationContext context = lockPaymentAndOrder(paymentId);
+    PaymentRow payment = context.payment();
+    ActionAudit audit = actionAudit(request, payment, "ZIPPY_OPERATIONS", "CANCEL-", "Payment cancelled by operations");
+    String requestHash = normalizedKey == null ? null : hashPaymentAction("CANCELLED", paymentId, audit);
+    PaymentIntentResponse replay = findPaymentOperationReplay(
+        paymentId, normalizedKey, "CANCELLED", requestHash);
+    if (replay != null) {
+      return replay;
+    }
+    if ("CANCELLED".equals(payment.status())) {
+      return toPaymentIntentResponse(payment);
+    }
     if (!"PENDING".equals(payment.status())) {
       throw new ApiException(409, "Only pending payments can be cancelled");
     }
-    jdbcTemplate.update("UPDATE payments SET status = ?, updated_at = ? WHERE payment_id = ?",
-        "CANCELLED", now(), paymentId);
-    return toPaymentIntentResponse(requirePayment(paymentId));
+    if (isTerminalOrderStatus(context.order().orderStatus())) {
+      throw new ApiException(409, "Payment cannot be cancelled for an order in status " + context.order().orderStatus());
+    }
+    String timestamp = now();
+    int updated = jdbcTemplate.update(
+        "UPDATE payments SET status = ?, updated_at = ? WHERE payment_id = ? AND status = 'PENDING'",
+        "CANCELLED", timestamp, paymentId
+    );
+    requireTransition(updated, "Payment was changed by another operation");
+    PaymentRow cancelled = requirePayment(paymentId);
+    recordPaymentTransaction(
+        cancelled, "CANCELLED", "PENDING", "CANCELLED", cancelled.amount(), audit.provider(),
+        audit.reference(), audit.reconciliationReference(), audit.reason(), currentActor(), normalizedKey,
+        requestHash, timestamp);
+    return toPaymentIntentResponse(cancelled);
   }
 
   @Transactional
-  public PaymentIntentResponse refundPayment(String paymentId) {
-    PaymentRow payment = requirePayment(paymentId);
+  public PaymentIntentResponse refundPayment(
+      String paymentId,
+      PaymentActionRequest request,
+      String idempotencyKey
+  ) {
+    String normalizedKey = normalizeIdempotencyKey(idempotencyKey);
+    lockPaymentOperationKey(normalizedKey);
+    PaymentOperationContext context = lockPaymentAndOrder(paymentId);
+    PaymentRow payment = context.payment();
+    ActionAudit audit = actionAudit(request, payment, "ZIPPY_OPERATIONS", "REFUND-", "Full refund completed by operations");
+    String requestHash = normalizedKey == null ? null : hashPaymentAction("REFUNDED", paymentId, audit);
+    PaymentIntentResponse replay = findPaymentOperationReplay(
+        paymentId, normalizedKey, "REFUNDED", requestHash);
+    if (replay != null) {
+      return replay;
+    }
+    if ("REFUNDED".equals(payment.status())) {
+      return toPaymentIntentResponse(payment);
+    }
     if (!"PREPAID".equals(payment.paymentMethod())
         || !("SUCCEEDED".equals(payment.status()) || "REFUND_PENDING".equals(payment.status()))) {
       throw new ApiException(409, "Only succeeded or refund-pending prepaid payments can be refunded");
     }
-    jdbcTemplate.update("UPDATE payments SET status = ?, refunded_amount = amount, updated_at = ? WHERE payment_id = ?",
-        "REFUNDED", now(), paymentId);
-    return toPaymentIntentResponse(requirePayment(paymentId));
+    ShipmentRow shipment = findShipmentForUpdate(context.order().id());
+    if (shipment == null || !List.of(STATUS_CANCELLED, STATUS_RTO, STATUS_DELIVERED).contains(shipment.currentStatus())) {
+      throw new ApiException(409, "Cancel or complete the shipment before refunding its prepaid payment");
+    }
+    String timestamp = now();
+    String previousStatus = payment.status();
+    int updated = jdbcTemplate.update("""
+        UPDATE payments
+        SET status = ?, refunded_amount = amount, refund_reference = ?,
+            refund_reconciliation_reference = ?, refunded_at = ?, updated_at = ?
+        WHERE payment_id = ? AND status IN ('SUCCEEDED', 'REFUND_PENDING')
+        """, "REFUNDED", audit.reference(), audit.reconciliationReference(), timestamp, timestamp, paymentId);
+    requireTransition(updated, "Payment was changed by another operation");
+    PaymentRow refunded = requirePayment(paymentId);
+    recordPaymentTransaction(
+        refunded, "REFUNDED", previousStatus, "REFUNDED", refunded.amount(), audit.provider(),
+        audit.reference(), audit.reconciliationReference(), audit.reason(), currentActor(), normalizedKey,
+        requestHash, timestamp);
+    return toPaymentIntentResponse(refunded);
   }
 
   @Transactional
-  public PaymentIntentResponse collectPayment(String paymentId) {
-    PaymentRow payment = requirePayment(paymentId);
+  public PaymentIntentResponse collectPayment(
+      String paymentId,
+      PaymentActionRequest request,
+      String idempotencyKey
+  ) {
+    String normalizedKey = normalizeIdempotencyKey(idempotencyKey);
+    lockPaymentOperationKey(normalizedKey);
+    PaymentOperationContext context = lockPaymentAndOrder(paymentId);
+    PaymentRow payment = context.payment();
+    ActionAudit audit = actionAudit(request, payment, "COD_OPERATIONS", "COLLECT-", "COD collected at delivery");
+    String requestHash = normalizedKey == null ? null : hashPaymentAction("COD_COLLECTED", paymentId, audit);
+    PaymentIntentResponse replay = findPaymentOperationReplay(
+        paymentId, normalizedKey, "COD_COLLECTED", requestHash);
+    if (replay != null) {
+      return replay;
+    }
     if (!"COD".equals(payment.paymentMethod())) {
       throw new ApiException(409, "Only COD payments can be collected at delivery");
     }
@@ -1773,16 +3071,26 @@ public class ZippyService {
       throw new ApiException(409, "COD payment cannot be collected from status " + payment.status());
     }
 
-    OrderRow order = findOrderByZippyId(payment.zippyOrderId());
-    ShipmentRow shipment = findShipment(order.id());
+    ShipmentRow shipment = findShipmentForUpdate(context.order().id());
     if (shipment == null || !STATUS_DELIVERED.equals(shipment.currentStatus())) {
       throw new ApiException(409, "COD can only be collected after delivery is confirmed");
     }
 
     String timestamp = now();
-    jdbcTemplate.update("UPDATE payments SET status = ?, collection_stage = ?, updated_at = ? WHERE payment_id = ?",
-        "SUCCEEDED", "DELIVERY", timestamp, paymentId);
-    return toPaymentIntentResponse(requirePayment(paymentId));
+    int updated = jdbcTemplate.update("""
+        UPDATE payments
+        SET status = ?, collection_stage = ?, provider = ?, provider_reference = ?,
+            reconciliation_reference = ?, collected_at = ?, updated_at = ?
+        WHERE payment_id = ? AND status = 'AWAITING_COLLECTION'
+        """, "SUCCEEDED", "DELIVERY", audit.provider(), audit.reference(), audit.reconciliationReference(),
+        timestamp, timestamp, paymentId);
+    requireTransition(updated, "Payment was changed by another operation");
+    PaymentRow collected = requirePayment(paymentId);
+    recordPaymentTransaction(
+        collected, "COD_COLLECTED", "AWAITING_COLLECTION", "SUCCEEDED", collected.amount(), audit.provider(),
+        audit.reference(), audit.reconciliationReference(), audit.reason(), currentActor(), normalizedKey,
+        requestHash, timestamp);
+    return toPaymentIntentResponse(collected);
   }
 
   public PaymentIntentResponse getPayment(String paymentId) {
@@ -1798,13 +3106,91 @@ public class ZippyService {
     ).stream().map(this::toPaymentIntentResponse).toList();
   }
 
-  private PaymentRow findPendingPaymentForOrder(long orderId) {
+  @Transactional(readOnly = true, isolation = Isolation.REPEATABLE_READ)
+  public PaymentTransactionHistoryResponse getPaymentTransactions(String paymentId, int limit, int offset) {
+    PaymentRow payment = requirePayment(paymentId);
+    return paymentTransactionHistory(payment.id(), payment.paymentId(), payment.zippyOrderId(), limit, offset, false);
+  }
+
+  @Transactional(readOnly = true, isolation = Isolation.REPEATABLE_READ)
+  public PaymentTransactionHistoryResponse getOrderPaymentTransactions(String orderId, int limit, int offset) {
+    OrderRow order = findOrderByZippyId(orderId);
+    return paymentTransactionHistory(order.id(), null, order.zippyOrderId(), limit, offset, true);
+  }
+
+  private PaymentTransactionHistoryResponse paymentTransactionHistory(
+      long databaseId,
+      String paymentId,
+      String orderId,
+      int limit,
+      int offset,
+      boolean byOrder
+  ) {
+    int safeLimit = Math.max(1, Math.min(limit, 100));
+    int safeOffset = Math.max(0, offset);
+    String column = byOrder ? "t.order_id" : "t.payment_id";
+    Long total = jdbcTemplate.queryForObject(
+        "SELECT COUNT(*) FROM payment_transactions t WHERE " + column + " = ?",
+        Long.class,
+        databaseId
+    );
+    List<PaymentTransactionResponse> transactions = jdbcTemplate.query("""
+            SELECT t.id, t.transaction_id, t.payment_id AS payment_database_id,
+                   p.payment_id AS payment_id, t.order_id AS order_database_id,
+                   t.zippy_order_id, t.event_type, t.previous_status, t.resulting_status,
+                   t.amount, t.currency, t.provider, t.provider_reference,
+                   t.reconciliation_reference, t.reason, t.actor, t.idempotency_key,
+                   t.request_hash, t.response_json, t.created_at
+            FROM payment_transactions t
+            JOIN payments p ON p.id = t.payment_id
+            """ + " WHERE " + column + " = ? ORDER BY t.created_at ASC, t.id ASC LIMIT ? OFFSET ?",
+        paymentTransactionRowMapper,
+        databaseId,
+        safeLimit,
+        safeOffset
+    ).stream().map(this::toPaymentTransactionResponse).toList();
+    return new PaymentTransactionHistoryResponse(
+        paymentId,
+        orderId,
+        safeLimit,
+        safeOffset,
+        total == null ? 0 : total,
+        transactions
+    );
+  }
+
+  private PaymentRow findBlockingPrepaidPaymentForOrder(long orderId) {
     List<PaymentRow> payments = jdbcTemplate.query(
-        "SELECT * FROM payments WHERE order_id = ? AND status = 'PENDING' ORDER BY id DESC LIMIT 1",
+        """
+        SELECT * FROM payments
+        WHERE order_id = ?
+          AND payment_method = 'PREPAID'
+          AND status IN ('PENDING', 'SUCCEEDED', 'REFUND_PENDING', 'REFUNDED')
+        ORDER BY id DESC
+        LIMIT 1
+        """,
         paymentRowMapper,
         orderId
     );
     return payments.isEmpty() ? null : payments.getFirst();
+  }
+
+  private boolean hasAnyPrepaidPayment(long orderId) {
+    Long count = jdbcTemplate.queryForObject(
+        "SELECT COUNT(*) FROM payments WHERE order_id = ? AND payment_method = 'PREPAID'",
+        Long.class,
+        orderId
+    );
+    return count != null && count > 0;
+  }
+
+  private boolean hasMatchingSucceededPrepaidPayment(long orderId, BigDecimal quotedAmount) {
+    Long count = jdbcTemplate.queryForObject("""
+        SELECT COUNT(*) FROM payments
+        WHERE order_id = ? AND payment_method = 'PREPAID' AND status = 'SUCCEEDED'
+          AND currency = 'INR' AND amount = ?
+        """, Long.class, orderId, quotedAmount.setScale(2, RoundingMode.HALF_UP));
+    return count != null && count > 0;
   }
 
   private void createCodPayment(OrderRow order, String timestamp) {
@@ -1817,15 +3203,20 @@ public class ZippyService {
       return;
     }
 
-    String paymentId = "COD-" + UUID.randomUUID().toString().substring(0, 8).toUpperCase();
+    String paymentId = "COD-" + UUID.randomUUID().toString().replace("-", "").toUpperCase();
     jdbcTemplate.update("""
         INSERT INTO payments (
           payment_id, order_id, zippy_order_id, amount, currency, status,
-          payment_method, collection_stage, created_at, updated_at
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+          payment_method, collection_stage, provider, provider_reference, created_at, updated_at
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         """,
         paymentId, order.id(), order.zippyOrderId(), defaultDecimal(order.codAmount()), "INR",
-        "AWAITING_COLLECTION", "COD", "DELIVERY", timestamp, timestamp);
+        "AWAITING_COLLECTION", "COD", "DELIVERY", "COD", paymentId, timestamp, timestamp);
+    PaymentRow payment = requirePayment(paymentId);
+    recordPaymentTransaction(
+        payment, "COD_AWAITING_COLLECTION", null, "AWAITING_COLLECTION", payment.amount(), "COD",
+        paymentId, null, "COD payment registered for collection at delivery", "ZIPPY_SYSTEM",
+        null, null, timestamp);
   }
 
   private PaymentRow requirePayment(String paymentId) {
@@ -1835,41 +3226,201 @@ public class ZippyService {
           paymentRowMapper,
           paymentId
       );
-    } catch (Exception exception) {
+    } catch (EmptyResultDataAccessException exception) {
       throw new ApiException(404, "Payment not found");
     }
   }
 
-  private PaymentIntentResponse toPaymentIntentResponse(PaymentRow payment) {
-    PaymentIntentResponse response = new PaymentIntentResponse();
-    response.setPaymentId(payment.paymentId());
-    response.setOrderId(payment.zippyOrderId());
-    response.setAmount(payment.amount());
-    response.setCurrency(payment.currency());
-    response.setStatus(payment.status());
-    response.setPaymentMethod(payment.paymentMethod());
-    response.setCollectionStage(payment.collectionStage());
-    response.setFailureCode(payment.failureCode());
-    response.setFailureReason(payment.failureReason());
-    response.setRefundedAmount(payment.refundedAmount());
-    response.setCreatedAt(LocalDateTime.ofInstant(Instant.parse(payment.createdAt()), ZoneOffset.UTC));
-    return response;
+  private PaymentRow requirePaymentForUpdate(String paymentId) {
+    try {
+      return jdbcTemplate.queryForObject(
+          "SELECT * FROM payments WHERE payment_id = ? FOR UPDATE",
+          paymentRowMapper,
+          paymentId
+      );
+    } catch (EmptyResultDataAccessException exception) {
+      throw new ApiException(404, "Payment not found");
+    }
   }
 
-  private Map<String, Object> paymentToMap(PaymentRow payment) {
-    Map<String, Object> response = new LinkedHashMap<>();
-    response.put("paymentId", payment.paymentId());
-    response.put("orderId", payment.zippyOrderId());
-    response.put("amount", payment.amount());
-    response.put("currency", payment.currency());
-    response.put("status", payment.status());
-    response.put("paymentMethod", payment.paymentMethod());
-    response.put("collectionStage", payment.collectionStage());
-    response.put("failureCode", payment.failureCode());
-    response.put("failureReason", payment.failureReason());
-    response.put("refundedAmount", payment.refundedAmount());
-    response.put("createdAt", payment.createdAt());
-    response.put("updatedAt", payment.updatedAt());
-    return response;
+  private PaymentOperationContext lockPaymentAndOrder(String paymentId) {
+    PaymentRow snapshot = requirePayment(paymentId);
+    OrderRow order = findOrderByIdForUpdate(snapshot.orderId());
+    PaymentRow payment = requirePaymentForUpdate(paymentId);
+    if (payment.orderId() != order.id()) {
+      throw new ApiException(409, "Payment no longer belongs to this order");
+    }
+    return new PaymentOperationContext(order, payment);
+  }
+
+  private void requireTransition(int updatedRows, String message) {
+    if (updatedRows != 1) {
+      throw new ApiException(409, message);
+    }
+  }
+
+  private ActionAudit actionAudit(
+      PaymentActionRequest request,
+      PaymentRow payment,
+      String defaultProvider,
+      String referencePrefix,
+      String defaultReason
+  ) {
+    String provider = request == null ? null : request.provider();
+    if (provider == null || provider.isBlank()) {
+      provider = defaultString(payment.provider(), defaultProvider);
+    } else {
+      provider = provider.trim().toUpperCase();
+    }
+    String reference = request == null ? null : request.reference();
+    if (reference == null || reference.isBlank()) {
+      reference = referencePrefix + payment.paymentId();
+    } else {
+      reference = reference.trim();
+    }
+    String reconciliation = request == null ? null : request.reconciliationReference();
+    if (reconciliation != null) {
+      reconciliation = reconciliation.trim();
+      if (reconciliation.isEmpty()) {
+        reconciliation = null;
+      }
+    }
+    String reason = request == null ? null : request.reason();
+    if (reason == null || reason.isBlank()) {
+      reason = defaultReason;
+    } else {
+      reason = reason.trim();
+    }
+    return new ActionAudit(provider, reference, reconciliation, reason);
+  }
+
+  private String defaultString(String value, String fallback) {
+    return value == null || value.isBlank() ? fallback : value;
+  }
+
+  private PaymentIntentResponse findPaymentOperationReplay(
+      String paymentId,
+      String idempotencyKey,
+      String eventType,
+      String requestHash
+  ) {
+    if (idempotencyKey == null) {
+      return null;
+    }
+    PaymentTransactionRow existing = findPaymentTransactionByIdempotency(idempotencyKey);
+    if (existing == null) {
+      return null;
+    }
+    if (!eventType.equals(existing.eventType())
+        || (paymentId != null && !paymentId.equals(existing.paymentId()))
+        || !Objects.equals(requestHash, existing.requestHash())) {
+      throw new ApiException(409, "Idempotency key reused with a different payment operation");
+    }
+    if (existing.responseJson() == null || existing.responseJson().isBlank()) {
+      return toPaymentIntentResponse(requirePayment(existing.paymentId()));
+    }
+    try {
+      return objectMapper.readValue(existing.responseJson(), PaymentIntentResponse.class);
+    } catch (Exception exception) {
+      throw new ApiException(500, "Stored payment idempotency response is invalid");
+    }
+  }
+
+  private PaymentTransactionRow findPaymentTransactionByIdempotency(String key) {
+    List<PaymentTransactionRow> transactions = jdbcTemplate.query("""
+            SELECT t.id, t.transaction_id, t.payment_id AS payment_database_id,
+                   p.payment_id AS payment_id, t.order_id AS order_database_id,
+                   t.zippy_order_id, t.event_type, t.previous_status, t.resulting_status,
+                   t.amount, t.currency, t.provider, t.provider_reference,
+                   t.reconciliation_reference, t.reason, t.actor, t.idempotency_key,
+                   t.request_hash, t.response_json, t.created_at
+            FROM payment_transactions t
+            JOIN payments p ON p.id = t.payment_id
+            WHERE t.idempotency_key = ?
+            """,
+        paymentTransactionRowMapper,
+        key
+    );
+    return transactions.isEmpty() ? null : transactions.getFirst();
+  }
+
+  private void recordPaymentTransaction(
+      PaymentRow payment,
+      String eventType,
+      String previousStatus,
+      String resultingStatus,
+      BigDecimal amount,
+      String provider,
+      String providerReference,
+      String reconciliationReference,
+      String reason,
+      String actor,
+      String idempotencyKey,
+      String requestHash,
+      String timestamp
+  ) {
+    String responseJson = idempotencyKey == null ? null : toJson(toPaymentIntentResponse(payment));
+    jdbcTemplate.update("""
+        INSERT INTO payment_transactions (
+          transaction_id, payment_id, order_id, zippy_order_id, event_type,
+          previous_status, resulting_status, amount, currency, provider,
+          provider_reference, reconciliation_reference, reason, actor,
+          idempotency_key, request_hash, response_json, created_at
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        """,
+        "PTX-" + UUID.randomUUID().toString().replace("-", "").toUpperCase(),
+        payment.id(), payment.orderId(), payment.zippyOrderId(), eventType,
+        previousStatus, resultingStatus, defaultDecimal(amount), payment.currency(),
+        defaultString(provider, "ZIPPY_INTERNAL"), providerReference, reconciliationReference,
+        defaultString(reason, "Payment state changed"), defaultString(actor, "ZIPPY_SYSTEM"),
+        idempotencyKey, requestHash, responseJson, timestamp);
+  }
+
+  private PaymentTransactionResponse toPaymentTransactionResponse(PaymentTransactionRow transaction) {
+    return new PaymentTransactionResponse(
+        transaction.transactionId(),
+        transaction.paymentId(),
+        transaction.orderId(),
+        transaction.eventType(),
+        transaction.previousStatus(),
+        transaction.resultingStatus(),
+        transaction.amount(),
+        transaction.currency(),
+        transaction.provider(),
+        transaction.providerReference(),
+        transaction.reconciliationReference(),
+        transaction.reason(),
+        transaction.actor(),
+        Instant.parse(transaction.createdAt())
+    );
+  }
+
+  private PaymentIntentResponse toPaymentIntentResponse(PaymentRow payment) {
+    return new PaymentIntentResponse(
+        payment.paymentId(),
+        payment.zippyOrderId(),
+        payment.amount(),
+        payment.currency(),
+        payment.status(),
+        payment.paymentMethod(),
+        payment.collectionStage(),
+        payment.failureCode(),
+        payment.failureReason(),
+        payment.refundedAmount(),
+        payment.provider(),
+        payment.providerReference(),
+        payment.reconciliationReference(),
+        payment.refundReference(),
+        payment.refundReconciliationReference(),
+        parseOptionalInstant(payment.capturedAt()),
+        parseOptionalInstant(payment.collectedAt()),
+        parseOptionalInstant(payment.refundedAt()),
+        Instant.parse(payment.createdAt()),
+        Instant.parse(payment.updatedAt())
+    );
+  }
+
+  private Instant parseOptionalInstant(String value) {
+    return value == null || value.isBlank() ? null : Instant.parse(value);
   }
 }

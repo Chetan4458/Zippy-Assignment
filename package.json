@@ -3,18 +3,29 @@
   "version": "1.0.0",
   "private": true,
   "type": "module",
+  "engines": {
+    "node": ">=22.12",
+    "npm": ">=9"
+  },
   "scripts": {
     "build": "vite build",
+    "check": "npm run test && npm run build && npm run package:backend",
     "dev": "node scripts/dev.mjs",
     "dev:frontend": "vite",
+    "package:backend": "mvn -q -f backend/pom.xml package -DskipTests",
+    "preview": "vite preview",
+    "sbom:frontend": "node -e \"require('node:fs').mkdirSync('artifacts',{recursive:true})\" && cyclonedx-npm --output-format JSON --output-file artifacts/frontend.cdx.json",
     "start": "mvn -q -f backend/pom.xml spring-boot:run",
-    "test": "mvn -q -f backend/pom.xml test"
+    "test": "npm run test:frontend && npm run test:backend",
+    "test:backend": "mvn -q -f backend/pom.xml test",
+    "test:frontend": "node --test client/src/app-utils.test.js"
   },
   "dependencies": {
     "react": "^19.1.1",
     "react-dom": "^19.1.1"
   },
   "devDependencies": {
+    "@cyclonedx/cyclonedx-npm": "^6.0.0",
     "@vitejs/plugin-react": "^6.0.4",
     "vite": "^8.1.5"
   }

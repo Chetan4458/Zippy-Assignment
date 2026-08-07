@@ -1,0 +1,28 @@
+{
+  "merchantOrderId": "MERCHANT-PREPAID-10002",
+  "customer": {
+    "name": "Aditi Rao",
+    "phone": "9123456789",
+    "email": "aditi@example.com"
+  },
+  "pickupAddress": {
+    "addressLine1": "8 Residency Road",
+    "city": "Bengaluru",
+    "state": "Karnataka",
+    "pincode": "560025"
+  },
+  "deliveryAddress": {
+    "addressLine1": "14 Park Street",
+    "city": "Kolkata",
+    "state": "West Bengal",
+    "pincode": "700016"
+  },
+  "package": {
+    "weightGrams": 850,
+    "lengthCm": 18,
+    "widthCm": 12,
+    "heightCm": 8
+  },
+  "paymentType": "PREPAID",
+  "codAmount": null
+}

@@ -1,0 +1,6 @@
+{
+  "reason": "Synthetic full refund after terminal shipment state",
+  "provider": "ZIPPY_DEMO_GATEWAY",
+  "reference": "refund-demo-20260807-0001",
+  "reconciliationReference": "recon-refund-demo-20260807-0001"
+}

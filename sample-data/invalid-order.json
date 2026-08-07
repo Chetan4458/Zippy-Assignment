@@ -1,0 +1,28 @@
+{
+  "merchantOrderId": "",
+  "customer": {
+    "name": "",
+    "phone": "12345",
+    "email": "not-an-email"
+  },
+  "pickupAddress": {
+    "addressLine1": "",
+    "city": "Bengaluru",
+    "state": "Karnataka",
+    "pincode": "000000"
+  },
+  "deliveryAddress": {
+    "addressLine1": "22 Connaught Place",
+    "city": "New Delhi",
+    "state": "Delhi",
+    "pincode": "110001"
+  },
+  "package": {
+    "weightGrams": 0,
+    "lengthCm": -1,
+    "widthCm": 15,
+    "heightCm": 10
+  },
+  "paymentType": "CASH",
+  "codAmount": 0
+}

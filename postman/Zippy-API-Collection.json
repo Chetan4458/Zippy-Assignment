@@ -1,112 +1,923 @@
 {
   "info": {
-    "name": "Zippy Mock Logistics Platform",
+    "name": "Zippy Logistics Operations API",
     "_postman_id": "2f2f4b3e-6b7c-4f95-a9f6-9dd7d2c3f0a1",
-    "description": "Collection for the Zippy mock logistics assignment.",
+    "description": "Runnable synthetic-data flows for health, delivered COD collection, prepaid capture/full refund, immutable payment ledgers, UTC finance reports, and carrier webhooks. Run numbered folders in order against a fresh local database with carrier automation disabled. Set apiKey only when targeting secured API routes. No request contacts a real payment provider or moves funds.",
     "schema": "https://schema.getpostman.com/json/collection/v2.1.0/collection.json"
+  },
+  "auth": {
+    "type": "apikey",
+    "apikey": [
+      { "key": "key", "value": "X-API-Key", "type": "string" },
+      { "key": "value", "value": "{{apiKey}}", "type": "string" },
+      { "key": "in", "value": "header", "type": "string" }
+    ]
   },
   "item": [
     {
-      "name": "Create Order",
-      "request": {
-        "method": "POST",
-        "header": [
-          { "key": "Content-Type", "value": "application/json" }
-        ],
-        "body": {
-          "mode": "raw",
-          "raw": "{\n  \"merchantOrderId\": \"MERCHANT-10001\",\n  \"customer\": {\n    \"name\": \"Rahul Sharma\",\n    \"phone\": \"9876543210\",\n    \"email\": \"rahul@example.com\"\n  },\n  \"pickupAddress\": {\n    \"addressLine1\": \"15 MG Road\",\n    \"city\": \"Bengaluru\",\n    \"state\": \"Karnataka\",\n    \"pincode\": \"560001\"\n  },\n  \"deliveryAddress\": {\n    \"addressLine1\": \"22 Connaught Place\",\n    \"city\": \"New Delhi\",\n    \"state\": \"Delhi\",\n    \"pincode\": \"110001\"\n  },\n  \"package\": {\n    \"weightGrams\": 1500,\n    \"lengthCm\": 20,\n    \"widthCm\": 15,\n    \"heightCm\": 10\n  },\n  \"paymentType\": \"COD\",\n  \"codAmount\": 2500\n}"
+      "name": "00 - System",
+      "item": [
+        {
+          "name": "Health",
+          "request": {
+            "method": "GET",
+            "url": "{{baseUrl}}/api/health"
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "exec": [
+                  "pm.test('service is healthy', function () {",
+                  "  pm.response.to.have.status(200);",
+                  "  pm.expect(pm.response.json().status).to.eql('UP');",
+                  "});"
+                ]
+              }
+            }
+          ]
         },
-        "url": "{{baseUrl}}/api/orders"
-      }
+        {
+          "name": "System Overview",
+          "request": {
+            "method": "GET",
+            "url": "{{baseUrl}}/api/system/overview"
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "exec": [
+                  "pm.test('overview is available', function () {",
+                  "  pm.response.to.have.status(200);",
+                  "  pm.expect(pm.response.json().supportedCarriers).to.be.an('array').that.is.not.empty;",
+                  "});"
+                ]
+              }
+            }
+          ]
+        }
+      ]
     },
     {
-      "name": "Get Order",
-      "request": {
-        "method": "GET",
-        "url": "{{baseUrl}}/api/orders/{{orderId}}"
-      }
-    },
-    {
-      "name": "Get Rates",
-      "request": {
-        "method": "GET",
-        "url": "{{baseUrl}}/api/orders/{{orderId}}/rates?sortBy=lowest"
-      }
-    },
-    {
-      "name": "Select Carrier",
-      "request": {
-        "method": "POST",
-        "header": [
-          { "key": "Content-Type", "value": "application/json" }
-        ],
-        "body": {
-          "mode": "raw",
-          "raw": "{\n  \"carrierCode\": \"FASTSHIP\",\n  \"serviceCode\": \"FAST-AIR\",\n  \"quotedAmount\": 182.9\n}"
+      "name": "01 - COD Order Workflow",
+      "item": [
+        {
+          "name": "1. Create COD Order",
+          "request": {
+            "method": "POST",
+            "header": [
+              { "key": "Content-Type", "value": "application/json" },
+              { "key": "Idempotency-Key", "value": "postman-cod-{{$guid}}" }
+            ],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"merchantOrderId\": \"POSTMAN-COD-{{$guid}}\",\n  \"customer\": {\n    \"name\": \"Rahul Sharma\",\n    \"phone\": \"9876543210\",\n    \"email\": \"rahul@example.com\"\n  },\n  \"pickupAddress\": {\n    \"addressLine1\": \"15 MG Road\",\n    \"city\": \"Bengaluru\",\n    \"state\": \"Karnataka\",\n    \"pincode\": \"560001\"\n  },\n  \"deliveryAddress\": {\n    \"addressLine1\": \"22 Connaught Place\",\n    \"city\": \"New Delhi\",\n    \"state\": \"Delhi\",\n    \"pincode\": \"110001\"\n  },\n  \"package\": {\n    \"weightGrams\": 1500,\n    \"lengthCm\": 20,\n    \"widthCm\": 15,\n    \"heightCm\": 10\n  },\n  \"paymentType\": \"COD\",\n  \"codAmount\": 2500\n}"
+            },
+            "url": "{{baseUrl}}/api/orders"
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "exec": [
+                  "pm.test('order is created with carrier quotes', function () {",
+                  "  pm.response.to.have.status(201);",
+                  "  const body = pm.response.json();",
+                  "  pm.expect(body.zippy_order_id).to.be.a('string');",
+                  "  pm.expect(body.shippingOptions).to.be.an('array').that.is.not.empty;",
+                  "  const quote = body.shippingOptions.find((item) => item.carrierCode === 'FASTSHIP') || body.shippingOptions[0];",
+                  "  pm.collectionVariables.set('orderId', body.zippy_order_id);",
+                  "  pm.collectionVariables.set('carrierCode', quote.carrierCode);",
+                  "  pm.collectionVariables.set('serviceCode', quote.serviceCode);",
+                  "  pm.collectionVariables.set('quotedAmount', quote.totalCharge);",
+                  "});"
+                ]
+              }
+            }
+          ]
         },
-        "url": "{{baseUrl}}/api/orders/{{orderId}}/select-carrier"
-      }
-    },
-    {
-      "name": "Create Shipment",
-      "request": {
-        "method": "POST",
-        "url": "{{baseUrl}}/api/orders/{{orderId}}/create-shipment"
-      }
-    },
-    {
-      "name": "Get Tracking",
-      "request": {
-        "method": "GET",
-        "url": "{{baseUrl}}/api/orders/{{orderId}}/tracking"
-      }
-    },
-    {
-      "name": "FastShip Webhook",
-      "request": {
-        "method": "POST",
-        "header": [
-          { "key": "Content-Type", "value": "application/json" }
-        ],
-        "body": {
-          "mode": "raw",
-          "raw": "{\n  \"shipment_id\": \"FS-700001\",\n  \"tracking_number\": \"FST123456789\",\n  \"event_code\": \"IN_TRANSIT\",\n  \"event_description\": \"Shipment departed Bengaluru hub\",\n  \"event_time\": \"2026-07-25T10:30:00Z\",\n  \"location\": \"Bengaluru Hub\"\n}"
+        {
+          "name": "2. Get Rates",
+          "request": {
+            "method": "GET",
+            "url": "{{baseUrl}}/api/orders/{{orderId}}/rates?sortBy=lowest"
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "exec": [
+                  "pm.test('rates are returned', function () {",
+                  "  pm.response.to.have.status(200);",
+                  "});"
+                ]
+              }
+            }
+          ]
         },
-        "url": "{{baseUrl}}/api/webhooks/fastship"
-      }
+        {
+          "name": "3. Select Carrier",
+          "request": {
+            "method": "POST",
+            "header": [
+              { "key": "Content-Type", "value": "application/json" }
+            ],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"carrierCode\": \"{{carrierCode}}\",\n  \"serviceCode\": \"{{serviceCode}}\",\n  \"quotedAmount\": {{quotedAmount}}\n}"
+            },
+            "url": "{{baseUrl}}/api/orders/{{orderId}}/select-carrier"
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "exec": [
+                  "pm.test('carrier is selected', function () {",
+                  "  pm.response.to.have.status(200);",
+                  "});"
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "name": "4. Create Shipment",
+          "request": {
+            "method": "POST",
+            "url": "{{baseUrl}}/api/orders/{{orderId}}/create-shipment"
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "exec": [
+                  "pm.test('shipment is created', function () {",
+                  "  pm.response.to.have.status(200);",
+                  "  const shipment = pm.response.json().shipment;",
+                  "  pm.expect(shipment.currentStatus).to.eql('SHIPMENT_CREATED');",
+                  "  pm.collectionVariables.set('carrierShipmentId', shipment.carrierShipmentId);",
+                  "  pm.collectionVariables.set('trackingNumber', shipment.trackingNumber);",
+                  "});"
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "name": "5. Get Tracking",
+          "request": {
+            "method": "GET",
+            "url": "{{baseUrl}}/api/orders/{{orderId}}/tracking"
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "exec": [
+                  "pm.test('tracking is available', function () {",
+                  "  pm.response.to.have.status(200);",
+                  "  pm.expect(pm.response.json().selectedShipment).to.be.an('object');",
+                  "});"
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "name": "6. Get COD Payment",
+          "request": {
+            "method": "GET",
+            "url": "{{baseUrl}}/api/orders/{{orderId}}/payments"
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "exec": [
+                  "pm.test('COD receivable exists', function () {",
+                  "  pm.response.to.have.status(200);",
+                  "  const payment = pm.response.json()[0];",
+                  "  pm.expect(payment.paymentMethod).to.eql('COD');",
+                  "  pm.collectionVariables.set('codPaymentId', payment.paymentId);",
+                  "});"
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "name": "7. Advance to Picked Up",
+          "request": {
+            "method": "POST",
+            "description": "Run this folder with ZIPPY_AUTOMATION_ENABLED=false for deterministic state progression.",
+            "url": "{{baseUrl}}/api/mock-carriers/{{orderId}}/advance"
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "exec": [
+                  "pm.test('shipment is picked up', function () {",
+                  "  pm.response.to.have.status(200);",
+                  "  pm.expect(pm.response.json().status).to.eql('PICKED_UP');",
+                  "});"
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "name": "8. Advance to In Transit",
+          "request": {
+            "method": "POST",
+            "url": "{{baseUrl}}/api/mock-carriers/{{orderId}}/advance"
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "exec": [
+                  "pm.test('shipment is in transit', function () {",
+                  "  pm.response.to.have.status(200);",
+                  "  pm.expect(pm.response.json().status).to.eql('IN_TRANSIT');",
+                  "});"
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "name": "9. Advance to Out for Delivery",
+          "request": {
+            "method": "POST",
+            "url": "{{baseUrl}}/api/mock-carriers/{{orderId}}/advance"
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "exec": [
+                  "pm.test('shipment is out for delivery', function () {",
+                  "  pm.response.to.have.status(200);",
+                  "  pm.expect(pm.response.json().status).to.eql('OUT_FOR_DELIVERY');",
+                  "});"
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "name": "10. Advance to Delivered",
+          "request": {
+            "method": "POST",
+            "url": "{{baseUrl}}/api/mock-carriers/{{orderId}}/advance"
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "exec": [
+                  "pm.test('shipment is delivered', function () {",
+                  "  pm.response.to.have.status(200);",
+                  "  pm.expect(pm.response.json().status).to.eql('DELIVERED');",
+                  "});"
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "name": "11. Collect Delivered COD",
+          "request": {
+            "method": "POST",
+            "header": [
+              { "key": "Content-Type", "value": "application/json" },
+              { "key": "Idempotency-Key", "value": "postman-cod-collect-{{codPaymentId}}" }
+            ],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"reason\": \"Synthetic COD receipt after confirmed delivery\",\n  \"provider\": \"ZIPPY_DEMO_COD\",\n  \"reference\": \"cod-receipt-{{codPaymentId}}\",\n  \"reconciliationReference\": \"cod-recon-{{codPaymentId}}\"\n}"
+            },
+            "url": "{{baseUrl}}/api/payments/{{codPaymentId}}/collect"
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "exec": [
+                  "pm.test('COD collection has audit references', function () {",
+                  "  pm.response.to.have.status(200);",
+                  "  const body = pm.response.json();",
+                  "  pm.expect(body.status).to.eql('SUCCEEDED');",
+                  "  pm.expect(body.paymentMethod).to.eql('COD');",
+                  "  pm.expect(body.provider).to.eql('ZIPPY_DEMO_COD');",
+                  "  pm.expect(body.providerReference).to.eql(pm.variables.replaceIn('cod-receipt-{{codPaymentId}}'));",
+                  "  pm.expect(body.reconciliationReference).to.eql(pm.variables.replaceIn('cod-recon-{{codPaymentId}}'));",
+                  "  pm.expect(body.collectedAt).to.be.a('string');",
+                  "});"
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "name": "12. Read COD Payment Ledger",
+          "request": {
+            "method": "GET",
+            "url": "{{baseUrl}}/api/payments/{{codPaymentId}}/transactions?limit=100&offset=0"
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "exec": [
+                  "pm.test('COD ledger is paginated and append-only shaped', function () {",
+                  "  pm.response.to.have.status(200);",
+                  "  const body = pm.response.json();",
+                  "  const events = body.transactions.map((item) => item.eventType);",
+                  "  pm.expect(body.paymentId).to.eql(pm.collectionVariables.get('codPaymentId'));",
+                  "  pm.expect(body.orderId).to.eql(pm.collectionVariables.get('orderId'));",
+                  "  pm.expect(body.totalTransactions).to.eql(body.transactions.length);",
+                  "  pm.expect(events).to.include('COD_AWAITING_COLLECTION');",
+                  "  pm.expect(events).to.include('COD_COLLECTED');",
+                  "  pm.expect(body.transactions.every((item) => typeof item.actor === 'string' && item.actor.length > 0)).to.eql(true);",
+                  "  pm.expect(new Set(body.transactions.map((item) => item.transactionId)).size).to.eql(body.transactions.length);",
+                  "});"
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "name": "13. Read Order Payment Ledger",
+          "request": {
+            "method": "GET",
+            "url": "{{baseUrl}}/api/orders/{{orderId}}/payment-transactions?limit=100&offset=0"
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "exec": [
+                  "pm.test('order ledger includes its COD collection', function () {",
+                  "  pm.response.to.have.status(200);",
+                  "  const body = pm.response.json();",
+                  "  pm.expect(body.paymentId).to.eql(null);",
+                  "  pm.expect(body.orderId).to.eql(pm.collectionVariables.get('orderId'));",
+                  "  pm.expect(body.transactions.some((item) => item.eventType === 'COD_COLLECTED')).to.eql(true);",
+                  "  pm.expect(body.transactions.every((item) => typeof item.actor === 'string' && item.actor.length > 0)).to.eql(true);",
+                  "});"
+                ]
+              }
+            }
+          ]
+        }
+      ]
     },
     {
-      "name": "QuickExpress Webhook",
-      "request": {
-        "method": "POST",
-        "header": [
-          { "key": "Content-Type", "value": "application/json" }
-        ],
-        "body": {
-          "mode": "raw",
-          "raw": "{\n  \"awb\": \"QE987654321\",\n  \"event\": {\n    \"type\": \"OFD\",\n    \"message\": \"Shipment is out for delivery\",\n    \"occurredAt\": \"2026-07-25T08:15:00Z\"\n  },\n  \"facility\": {\n    \"city\": \"New Delhi\",\n    \"code\": \"DEL-01\"\n  }\n}"
+      "name": "02 - Prepaid Payment Workflow",
+      "item": [
+        {
+          "name": "1. Create Prepaid Order",
+          "request": {
+            "method": "POST",
+            "header": [
+              { "key": "Content-Type", "value": "application/json" },
+              { "key": "Idempotency-Key", "value": "postman-prepaid-{{$guid}}" }
+            ],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"merchantOrderId\": \"POSTMAN-PREPAID-{{$guid}}\",\n  \"customer\": {\n    \"name\": \"Aditi Rao\",\n    \"phone\": \"9123456789\",\n    \"email\": \"aditi@example.com\"\n  },\n  \"pickupAddress\": {\n    \"addressLine1\": \"8 Residency Road\",\n    \"city\": \"Bengaluru\",\n    \"state\": \"Karnataka\",\n    \"pincode\": \"560025\"\n  },\n  \"deliveryAddress\": {\n    \"addressLine1\": \"14 Park Street\",\n    \"city\": \"Kolkata\",\n    \"state\": \"West Bengal\",\n    \"pincode\": \"700016\"\n  },\n  \"package\": {\n    \"weightGrams\": 850,\n    \"lengthCm\": 18,\n    \"widthCm\": 12,\n    \"heightCm\": 8\n  },\n  \"paymentType\": \"PREPAID\",\n  \"codAmount\": null\n}"
+            },
+            "url": "{{baseUrl}}/api/orders"
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "exec": [
+                  "pm.test('prepaid order is created', function () {",
+                  "  pm.response.to.have.status(201);",
+                  "  const body = pm.response.json();",
+                  "  const quote = body.shippingOptions.find((item) => item.carrierCode === 'FASTSHIP') || body.shippingOptions[0];",
+                  "  const alternativeQuote = body.shippingOptions.find((item) => item.carrierCode !== quote.carrierCode || item.serviceCode !== quote.serviceCode);",
+                  "  pm.expect(alternativeQuote, 'an alternative quote is required for the carrier-freeze check').to.exist;",
+                  "  pm.collectionVariables.set('prepaidOrderId', body.zippy_order_id);",
+                  "  pm.collectionVariables.set('prepaidCarrierCode', quote.carrierCode);",
+                  "  pm.collectionVariables.set('prepaidServiceCode', quote.serviceCode);",
+                  "  pm.collectionVariables.set('prepaidAmount', quote.totalCharge);",
+                  "  pm.collectionVariables.set('alternativeCarrierCode', alternativeQuote.carrierCode);",
+                  "  pm.collectionVariables.set('alternativeServiceCode', alternativeQuote.serviceCode);",
+                  "  pm.collectionVariables.set('alternativeAmount', alternativeQuote.totalCharge);",
+                  "});"
+                ]
+              }
+            }
+          ]
         },
-        "url": "{{baseUrl}}/api/webhooks/quickexpress"
-      }
+        {
+          "name": "2. Select Prepaid Carrier",
+          "request": {
+            "method": "POST",
+            "header": [
+              { "key": "Content-Type", "value": "application/json" }
+            ],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"carrierCode\": \"{{prepaidCarrierCode}}\",\n  \"serviceCode\": \"{{prepaidServiceCode}}\",\n  \"quotedAmount\": {{prepaidAmount}}\n}"
+            },
+            "url": "{{baseUrl}}/api/orders/{{prepaidOrderId}}/select-carrier"
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "exec": [
+                  "pm.test('prepaid carrier is selected', function () {",
+                  "  pm.response.to.have.status(200);",
+                  "});"
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "name": "3. Create Payment Intent",
+          "request": {
+            "method": "POST",
+            "header": [
+              { "key": "Content-Type", "value": "application/json" },
+              { "key": "Idempotency-Key", "value": "postman-intent-{{prepaidOrderId}}" }
+            ],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"orderId\": \"{{prepaidOrderId}}\",\n  \"amount\": {{prepaidAmount}},\n  \"currency\": \"INR\"\n}"
+            },
+            "url": "{{baseUrl}}/api/payments"
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "exec": [
+                  "pm.test('payment intent is pending', function () {",
+                  "  pm.response.to.have.status(201);",
+                  "  const body = pm.response.json();",
+                  "  pm.expect(body.status).to.eql('PENDING');",
+                  "  pm.expect(body.provider).to.eql('ZIPPY_CHECKOUT');",
+                  "  pm.expect(body.providerReference).to.eql(body.paymentId);",
+                  "  pm.collectionVariables.set('paymentId', body.paymentId);",
+                  "  pm.collectionVariables.set('paymentIntentResponse', pm.response.text());",
+                  "});"
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "name": "4. Replay Exact Payment Intent",
+          "request": {
+            "method": "POST",
+            "header": [
+              { "key": "Content-Type", "value": "application/json" },
+              { "key": "Idempotency-Key", "value": "postman-intent-{{prepaidOrderId}}" }
+            ],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"orderId\": \"{{prepaidOrderId}}\",\n  \"amount\": {{prepaidAmount}},\n  \"currency\": \"INR\"\n}"
+            },
+            "url": "{{baseUrl}}/api/payments"
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "exec": [
+                  "pm.test('exact intent retry returns the originally stored response', function () {",
+                  "  pm.response.to.have.status(201);",
+                  "  pm.expect(pm.response.text()).to.eql(pm.collectionVariables.get('paymentIntentResponse'));",
+                  "});"
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "name": "5. Reject Global Idempotency-Key Reuse",
+          "request": {
+            "method": "POST",
+            "header": [
+              { "key": "Content-Type", "value": "application/json" },
+              { "key": "Idempotency-Key", "value": "postman-intent-{{prepaidOrderId}}" }
+            ],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"reason\": \"This different operation must not reuse the intent key\",\n  \"provider\": \"ZIPPY_DEMO_GATEWAY\",\n  \"reference\": \"invalid-reuse-{{paymentId}}\",\n  \"reconciliationReference\": \"invalid-reuse-{{paymentId}}\"\n}"
+            },
+            "url": "{{baseUrl}}/api/payments/{{paymentId}}/confirm"
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "exec": [
+                  "pm.test('global key reuse for another operation conflicts', function () {",
+                  "  pm.response.to.have.status(409);",
+                  "  pm.expect(pm.response.json().message).to.include('Idempotency key');",
+                  "});"
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "name": "6. Reject Carrier Reselection After Intent",
+          "request": {
+            "method": "POST",
+            "header": [
+              { "key": "Content-Type", "value": "application/json" }
+            ],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"carrierCode\": \"{{alternativeCarrierCode}}\",\n  \"serviceCode\": \"{{alternativeServiceCode}}\",\n  \"quotedAmount\": {{alternativeAmount}}\n}"
+            },
+            "url": "{{baseUrl}}/api/orders/{{prepaidOrderId}}/select-carrier"
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "exec": [
+                  "pm.test('material carrier changes are frozen after prepaid intent creation', function () {",
+                  "  pm.response.to.have.status(409);",
+                  "  pm.expect(pm.response.json().message).to.include('prepaid payment intent');",
+                  "});"
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "name": "7. Confirm Payment",
+          "request": {
+            "method": "POST",
+            "header": [
+              { "key": "Content-Type", "value": "application/json" },
+              { "key": "Idempotency-Key", "value": "postman-capture-{{paymentId}}" }
+            ],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"reason\": \"Synthetic provider authorization completed\",\n  \"provider\": \"ZIPPY_DEMO_GATEWAY\",\n  \"reference\": \"capture-{{paymentId}}\",\n  \"reconciliationReference\": \"recon-capture-{{paymentId}}\"\n}"
+            },
+            "url": "{{baseUrl}}/api/payments/{{paymentId}}/confirm"
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "exec": [
+                  "pm.test('payment succeeds', function () {",
+                  "  pm.response.to.have.status(200);",
+                  "  const body = pm.response.json();",
+                  "  pm.expect(body.status).to.eql('SUCCEEDED');",
+                  "  pm.expect(body.provider).to.eql('ZIPPY_DEMO_GATEWAY');",
+                  "  pm.expect(body.providerReference).to.eql(pm.variables.replaceIn('capture-{{paymentId}}'));",
+                  "  pm.expect(body.reconciliationReference).to.eql(pm.variables.replaceIn('recon-capture-{{paymentId}}'));",
+                  "  pm.expect(body.capturedAt).to.be.a('string');",
+                  "});"
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "name": "8. Create Prepaid Shipment",
+          "request": {
+            "method": "POST",
+            "url": "{{baseUrl}}/api/orders/{{prepaidOrderId}}/create-shipment"
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "exec": [
+                  "pm.test('paid shipment is created before cancellation', function () {",
+                  "  pm.response.to.have.status(200);",
+                  "  pm.expect(pm.response.json().shipment.currentStatus).to.eql('SHIPMENT_CREATED');",
+                  "});"
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "name": "9. Cancel Shipment and Order",
+          "request": {
+            "method": "POST",
+            "url": "{{baseUrl}}/api/orders/{{prepaidOrderId}}/cancel"
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "exec": [
+                  "pm.test('terminal cancellation makes prepaid payment refundable', function () {",
+                  "  pm.response.to.have.status(200);",
+                  "  pm.expect(pm.response.json().order_status).to.eql('CANCELLED');",
+                  "});"
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "name": "10. Refund Payment",
+          "request": {
+            "method": "POST",
+            "header": [
+              { "key": "Content-Type", "value": "application/json" },
+              { "key": "Idempotency-Key", "value": "postman-refund-{{paymentId}}" }
+            ],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"reason\": \"Synthetic full refund after shipment cancellation\",\n  \"provider\": \"ZIPPY_DEMO_GATEWAY\",\n  \"reference\": \"refund-{{paymentId}}\",\n  \"reconciliationReference\": \"recon-refund-{{paymentId}}\"\n}"
+            },
+            "url": "{{baseUrl}}/api/payments/{{paymentId}}/refund"
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "exec": [
+                  "pm.test('payment is refunded', function () {",
+                  "  pm.response.to.have.status(200);",
+                  "  const body = pm.response.json();",
+                  "  pm.expect(body.status).to.eql('REFUNDED');",
+                  "  pm.expect(Number(body.refundedAmount)).to.eql(Number(body.amount));",
+                  "  pm.expect(body.refundReference).to.eql(pm.variables.replaceIn('refund-{{paymentId}}'));",
+                  "  pm.expect(body.reconciliationReference).to.eql(pm.variables.replaceIn('recon-capture-{{paymentId}}'));",
+                  "  pm.expect(body.refundReconciliationReference).to.eql(pm.variables.replaceIn('recon-refund-{{paymentId}}'));",
+                  "  pm.expect(body.refundedAt).to.be.a('string');",
+                  "});"
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "name": "11. Read Prepaid Payment Ledger",
+          "request": {
+            "method": "GET",
+            "url": "{{baseUrl}}/api/payments/{{paymentId}}/transactions?limit=100&offset=0"
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "exec": [
+                  "pm.test('prepaid ledger records capture and full refund', function () {",
+                  "  pm.response.to.have.status(200);",
+                  "  const body = pm.response.json();",
+                  "  const events = body.transactions.map((item) => item.eventType);",
+                  "  pm.expect(events).to.include('INTENT_CREATED');",
+                  "  pm.expect(events).to.include('CAPTURED');",
+                  "  pm.expect(events).to.include('REFUND_PENDING');",
+                  "  pm.expect(events).to.include('REFUNDED');",
+                  "  const captured = body.transactions.find((item) => item.eventType === 'CAPTURED');",
+                  "  const refunded = body.transactions.find((item) => item.eventType === 'REFUNDED');",
+                  "  pm.expect(Number(refunded.amount)).to.eql(Number(captured.amount));",
+                  "  pm.expect(captured.reconciliationReference).to.eql(pm.variables.replaceIn('recon-capture-{{paymentId}}'));",
+                  "  pm.expect(refunded.providerReference).to.eql(pm.variables.replaceIn('refund-{{paymentId}}'));",
+                  "  pm.expect(refunded.reconciliationReference).to.eql(pm.variables.replaceIn('recon-refund-{{paymentId}}'));",
+                  "  pm.expect(body.transactions.every((item) => typeof item.actor === 'string' && item.actor.length > 0)).to.eql(true);",
+                  "});"
+                ]
+              }
+            }
+          ]
+        }
+      ]
     },
     {
-      "name": "Reliable Webhook",
-      "request": {
-        "method": "POST",
-        "header": [
-          { "key": "Content-Type", "value": "application/json" }
-        ],
-        "body": {
-          "mode": "raw",
-          "raw": "{\n  \"trackingCode\": \"RC1122334455\",\n  \"statusId\": 50,\n  \"statusText\": \"Delivered\",\n  \"updatedOn\": \"2026-07-25T15:45:00Z\",\n  \"proofOfDelivery\": {\n    \"receivedBy\": \"Rahul Sharma\",\n    \"deliveryLocation\": \"New Delhi\"\n  }\n}"
+      "name": "03 - Finance Reports",
+      "description": "Uses today's UTC calendar date so the synthetic COD collection and prepaid capture/refund from folders 01 and 02 are included.",
+      "event": [
+        {
+          "listen": "prerequest",
+          "script": {
+            "exec": [
+              "if (pm.info.requestName === '1. Current UTC Finance Summary') {",
+              "  const today = new Date().toISOString().slice(0, 10);",
+              "  pm.collectionVariables.set('reportFrom', today);",
+              "  pm.collectionVariables.set('reportTo', today);",
+              "}"
+            ]
+          }
+        }
+      ],
+      "item": [
+        {
+          "name": "1. Current UTC Finance Summary",
+          "request": {
+            "method": "GET",
+            "url": "{{baseUrl}}/api/reports/summary?from={{reportFrom}}&to={{reportTo}}"
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "exec": [
+                  "pm.test('summary exposes exact UTC boundaries and truthful totals', function () {",
+                  "  pm.response.to.have.status(200);",
+                  "  const body = pm.response.json();",
+                  "  const from = pm.collectionVariables.get('reportFrom');",
+                  "  const to = pm.collectionVariables.get('reportTo');",
+                  "  const expectedToExclusive = new Date(`${to}T00:00:00Z`);",
+                  "  expectedToExclusive.setUTCDate(expectedToExclusive.getUTCDate() + 1);",
+                  "  pm.expect(new Date(body.filters.fromInclusive).getTime()).to.eql(new Date(`${from}T00:00:00Z`).getTime());",
+                  "  pm.expect(new Date(body.filters.toExclusive).getTime()).to.eql(expectedToExclusive.getTime());",
+                  "  const finance = body.finance;",
+                  "  pm.expect(Number(finance.netCollected)).to.eql(Number((Number(finance.grossCollected) - Number(finance.refunds)).toFixed(2)));",
+                  "  pm.expect(finance).to.have.property('codOutstanding');",
+                  "  pm.expect(finance).to.have.property('shipmentCost');",
+                  "  pm.expect(finance).to.have.property('costedShipmentCount');",
+                  "  pm.expect(Number(finance.activeShipmentCount)).to.be.at.most(Number(finance.costedShipmentCount));",
+                  "  pm.expect(body).to.have.property('totalShippingCost');",
+                  "  pm.expect(body).not.to.have.property('totalShippingRevenue');",
+                  "  pm.expect(body.scope).to.deep.include({ operationalTotals: 'ALL_TIME', finance: 'FILTERED', cashFlowDateBasis: 'PAYMENT_TRANSACTION_CREATED_AT_UTC', balanceDateBasis: 'PAYMENT_CREATED_AT_UTC', shipmentDateBasis: 'SHIPMENT_CREATED_AT_UTC' });",
+                  "  pm.collectionVariables.set('summaryGrossCollected', finance.grossCollected);",
+                  "  pm.collectionVariables.set('summaryRefunds', finance.refunds);",
+                  "  pm.collectionVariables.set('summaryNetCollected', finance.netCollected);",
+                  "});"
+                ]
+              }
+            }
+          ]
         },
-        "url": "{{baseUrl}}/api/webhooks/reliable"
-      }
+        {
+          "name": "2. Filtered COD Payment Snapshots",
+          "request": {
+            "method": "GET",
+            "url": "{{baseUrl}}/api/reports/payments?from={{reportFrom}}&to={{reportTo}}&status=SUCCEEDED&method=COD&carrier={{carrierCode}}&search={{codPaymentId}}&limit=50&offset=0"
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "exec": [
+                  "pm.test('snapshot filters, paging, and audit fields are explicit', function () {",
+                  "  pm.response.to.have.status(200);",
+                  "  const body = pm.response.json();",
+                  "  pm.expect(body.limit).to.eql(50);",
+                  "  pm.expect(body.offset).to.eql(0);",
+                  "  pm.expect(body.totalPayments).to.be.at.least(1);",
+                  "  pm.expect(body.payments.length).to.be.at.least(1);",
+                  "  body.payments.forEach((payment) => {",
+                  "    pm.expect(payment.status).to.eql('SUCCEEDED');",
+                  "    pm.expect(payment.paymentMethod).to.eql('COD');",
+                  "    pm.expect(payment.provider).to.eql('ZIPPY_DEMO_COD');",
+                  "    pm.expect(payment.providerReference).to.be.a('string');",
+                  "    pm.expect(payment.reconciliationReference).to.be.a('string');",
+                  "  });",
+                  "  pm.expect(body.filters.status).to.eql('SUCCEEDED');",
+                  "  pm.expect(body.filters.method).to.eql('COD');",
+                  "  pm.expect(body.filters.carrier).to.eql(pm.collectionVariables.get('carrierCode'));",
+                  "});"
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "name": "3. Literal Search Does Not Expand Wildcards",
+          "request": {
+            "method": "GET",
+            "url": "{{baseUrl}}/api/reports/payments?search=%25&limit=50&offset=0"
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "exec": [
+                  "pm.test('percent is treated as a literal substring, not a SQL wildcard', function () {",
+                  "  pm.response.to.have.status(200);",
+                  "  const body = pm.response.json();",
+                  "  pm.expect(body.filters.search).to.eql('%');",
+                  "  pm.expect(body.totalPayments).to.eql(0);",
+                  "  pm.expect(body.payments).to.eql([]);",
+                  "});"
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "name": "4. Current UTC Daily Cash Flow",
+          "request": {
+            "method": "GET",
+            "url": "{{baseUrl}}/api/reports/daily-trend?from={{reportFrom}}&to={{reportTo}}"
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "exec": [
+                  "pm.test('daily cash flow reconciles to the identically filtered summary', function () {",
+                  "  pm.response.to.have.status(200);",
+                  "  const body = pm.response.json();",
+                  "  pm.expect(body.dailyTrend).to.be.an('array').that.is.not.empty;",
+                  "  const totals = body.dailyTrend.reduce((sum, row) => {",
+                  "    sum.gross += Number(row.grossCollected);",
+                  "    sum.refunds += Number(row.refunds);",
+                  "    sum.net += Number(row.netCollected);",
+                  "    pm.expect(Number(row.netCollected)).to.eql(Number((Number(row.grossCollected) - Number(row.refunds)).toFixed(2)));",
+                  "    return sum;",
+                  "  }, { gross: 0, refunds: 0, net: 0 });",
+                  "  pm.expect(Number(totals.gross.toFixed(2))).to.eql(Number(pm.collectionVariables.get('summaryGrossCollected')));",
+                  "  pm.expect(Number(totals.refunds.toFixed(2))).to.eql(Number(pm.collectionVariables.get('summaryRefunds')));",
+                  "  pm.expect(Number(totals.net.toFixed(2))).to.eql(Number(pm.collectionVariables.get('summaryNetCollected')));",
+                  "});"
+                ]
+              }
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "name": "04 - Webhook Examples",
+      "item": [
+        {
+          "name": "FastShip Picked Up Webhook",
+          "request": {
+            "method": "POST",
+            "description": "Use after creating a FastShip shipment with automation disabled or before automation advances it.",
+            "header": [
+              { "key": "Content-Type", "value": "application/json" }
+            ],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"shipment_id\": \"{{carrierShipmentId}}\",\n  \"tracking_number\": \"{{trackingNumber}}\",\n  \"event_id\": \"POSTMAN-PICKED-{{$guid}}\",\n  \"event_code\": \"PICKED_UP\",\n  \"event_description\": \"Shipment collected from merchant\",\n  \"event_time\": \"{{$isoTimestamp}}\",\n  \"location\": \"Bengaluru\"\n}"
+            },
+            "url": "{{baseUrl}}/api/webhooks/fastship"
+          }
+        },
+        {
+          "name": "QuickExpress Out-for-delivery Webhook",
+          "request": {
+            "method": "POST",
+            "header": [
+              { "key": "Content-Type", "value": "application/json" }
+            ],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"awb\": \"QE987654321\",\n  \"event\": {\n    \"id\": \"POSTMAN-OFD-{{$guid}}\",\n    \"type\": \"OFD\",\n    \"message\": \"Shipment is out for delivery\",\n    \"occurredAt\": \"{{$isoTimestamp}}\"\n  },\n  \"facility\": {\n    \"city\": \"New Delhi\",\n    \"code\": \"DEL-01\"\n  }\n}"
+            },
+            "url": "{{baseUrl}}/api/webhooks/quickexpress"
+          }
+        },
+        {
+          "name": "Reliable Delivered Webhook",
+          "request": {
+            "method": "POST",
+            "header": [
+              { "key": "Content-Type", "value": "application/json" }
+            ],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"trackingCode\": \"RC1122334455\",\n  \"eventId\": \"POSTMAN-DELIVERED-{{$guid}}\",\n  \"statusId\": 50,\n  \"statusText\": \"Delivered\",\n  \"updatedOn\": \"{{$isoTimestamp}}\",\n  \"proofOfDelivery\": {\n    \"receivedBy\": \"Rahul Sharma\",\n    \"deliveryLocation\": \"New Delhi\"\n  }\n}"
+            },
+            "url": "{{baseUrl}}/api/webhooks/reliable"
+          }
+        }
+      ]
     }
   ],
   "variable": [
-    { "key": "baseUrl", "value": "http://localhost:3000" },
-    { "key": "orderId", "value": "ZPY-ORD-10001" }
+    { "key": "baseUrl", "value": "http://localhost:8080" },
+    { "key": "apiKey", "value": "" },
+    { "key": "orderId", "value": "" },
+    { "key": "carrierCode", "value": "FASTSHIP" },
+    { "key": "serviceCode", "value": "" },
+    { "key": "quotedAmount", "value": "0" },
+    { "key": "carrierShipmentId", "value": "" },
+    { "key": "trackingNumber", "value": "" },
+    { "key": "codPaymentId", "value": "" },
+    { "key": "prepaidOrderId", "value": "" },
+    { "key": "prepaidCarrierCode", "value": "FASTSHIP" },
+    { "key": "prepaidServiceCode", "value": "" },
+    { "key": "prepaidAmount", "value": "0" },
+    { "key": "alternativeCarrierCode", "value": "" },
+    { "key": "alternativeServiceCode", "value": "" },
+    { "key": "alternativeAmount", "value": "0" },
+    { "key": "paymentId", "value": "" },
+    { "key": "paymentIntentResponse", "value": "" },
+    { "key": "reportFrom", "value": "" },
+    { "key": "reportTo", "value": "" },
+    { "key": "summaryGrossCollected", "value": "0" },
+    { "key": "summaryRefunds", "value": "0" },
+    { "key": "summaryNetCollected", "value": "0" }
   ]
 }

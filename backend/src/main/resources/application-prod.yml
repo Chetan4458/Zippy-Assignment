@@ -1,0 +1,21 @@
+spring:
+  datasource:
+    url: ${SPRING_DATASOURCE_URL}
+    driverClassName: ${SPRING_DATASOURCE_DRIVER_CLASS_NAME:org.h2.Driver}
+    username: ${SPRING_DATASOURCE_USERNAME}
+    password: ${SPRING_DATASOURCE_PASSWORD}
+
+zippy:
+  security:
+    api-key:
+      enabled: true
+      header: X-API-Key
+      value: ${ZIPPY_API_KEY:}
+    webhooks:
+      enabled: true
+      max-age-seconds: ${ZIPPY_WEBHOOK_MAX_AGE_SECONDS:300}
+      max-body-bytes: ${ZIPPY_WEBHOOK_MAX_BODY_BYTES:1048576}
+      secrets:
+        fastship: ${ZIPPY_WEBHOOK_SECRET_FASTSHIP:}
+        quickexpress: ${ZIPPY_WEBHOOK_SECRET_QUICKEXPRESS:}
+        reliable: ${ZIPPY_WEBHOOK_SECRET_RELIABLE:}

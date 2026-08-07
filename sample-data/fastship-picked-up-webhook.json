@@ -1,0 +1,9 @@
+{
+  "shipment_id": "FS-700001",
+  "tracking_number": "FST123456789",
+  "event_id": "FS-PICKED-UP-10001",
+  "event_code": "PICKED_UP",
+  "event_description": "Shipment collected from merchant",
+  "event_time": "2026-08-07T10:30:00Z",
+  "location": "Bengaluru"
+}

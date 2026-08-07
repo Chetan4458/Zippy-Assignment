@@ -1,0 +1,13 @@
+{
+  "awb": "QE987654321",
+  "event": {
+    "id": "QE-OFD-10001",
+    "type": "OFD",
+    "message": "Shipment is out for delivery",
+    "occurredAt": "2026-08-07T12:15:00Z"
+  },
+  "facility": {
+    "city": "New Delhi",
+    "code": "DEL-01"
+  }
+}

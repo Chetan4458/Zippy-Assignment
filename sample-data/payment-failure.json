@@ -1,0 +1,5 @@
+{
+  "code": "DEMO_PROVIDER_DECLINED",
+  "reason": "Synthetic issuer decline for failure-path testing",
+  "reference": "decline-demo-20260807-0001"
+}

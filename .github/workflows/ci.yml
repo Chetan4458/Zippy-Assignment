@@ -1,0 +1,176 @@
+name: CI
+
+on:
+  push:
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  quality:
+    name: Tests and builds
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Set up Java 21
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: "21"
+          cache: maven
+
+      - name: Set up Node.js 24
+        uses: actions/setup-node@v4
+        with:
+          node-version: "24"
+          cache: npm
+
+      - name: Install locked frontend dependencies
+        run: npm ci --no-audit --no-fund
+
+      - name: Audit npm dependencies
+        run: npm audit --audit-level=high
+
+      - name: Run tests and production builds
+        run: npm run check
+
+      - name: Generate CycloneDX SBOMs
+        run: |
+          mkdir -p artifacts
+          npm run sbom:frontend
+          mvn -B -ntp -f backend/pom.xml org.cyclonedx:cyclonedx-maven-plugin:2.9.3:makeAggregateBom \
+            -DoutputFormat=json \
+            -DschemaVersion=1.6 \
+            -DoutputName=backend.cdx \
+            -DoutputDirectory="${{ github.workspace }}/artifacts"
+
+      - name: Upload CycloneDX SBOMs
+        uses: actions/upload-artifact@v4
+        with:
+          name: cyclonedx-sbom
+          path: artifacts/*.json
+          if-no-files-found: error
+          retention-days: 14
+
+  secrets:
+    name: Secret scan
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Verify the secret scanner can detect a known pattern
+        shell: bash
+        run: |
+          printf '%s%s\n' 'ghp_' 'aBcDeFgHiJkLmNoPqRsTuVwXyZ0123456789' > "${RUNNER_TEMP}/gitleaks-probe.txt"
+          set +e
+          docker run --rm \
+            --volume "${RUNNER_TEMP}/gitleaks-probe.txt:/probe.txt:ro" \
+            ghcr.io/gitleaks/gitleaks:v8.30.0 \
+            dir --redact --no-banner /probe.txt
+          probe_status=$?
+          set -e
+          rm -f "${RUNNER_TEMP}/gitleaks-probe.txt"
+          if [ "${probe_status}" -eq 0 ]; then
+            echo "Gitleaks did not detect the synthetic probe."
+            exit 1
+          fi
+          if [ "${probe_status}" -ne 1 ]; then
+            echo "Gitleaks probe failed with unexpected status ${probe_status}."
+            exit "${probe_status}"
+          fi
+
+      - name: Scan repository history with Gitleaks
+        run: |
+          docker run --rm \
+            --volume "${GITHUB_WORKSPACE}:/repo:ro" \
+            ghcr.io/gitleaks/gitleaks:v8.30.0 \
+            git --redact --no-banner --verbose /repo
+
+  container:
+    name: Container smoke test
+    needs:
+      - quality
+      - secrets
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Validate Compose configuration
+        run: docker compose config --quiet
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Build application image
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          load: true
+          push: false
+          tags: zippy:ci
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+      - name: Start application image
+        run: |
+          docker run --detach --name zippy-ci \
+            --publish 127.0.0.1:18080:8080 \
+            --env SPRING_PROFILES_ACTIVE=prod \
+            --env "SPRING_DATASOURCE_URL=jdbc:h2:mem:zippy-ci;MODE=PostgreSQL;DATABASE_TO_UPPER=false;DB_CLOSE_DELAY=-1" \
+            --env SPRING_DATASOURCE_USERNAME=sa \
+            --env SPRING_DATASOURCE_PASSWORD=ci-database-password \
+            --env ZIPPY_API_KEY=ci-test-api-key-not-a-secret-00000001 \
+            --env ZIPPY_WEBHOOK_SECRET_FASTSHIP=ci-test-fastship-secret-not-real-00001 \
+            --env ZIPPY_WEBHOOK_SECRET_QUICKEXPRESS=ci-test-quickexpress-secret-not-real-01 \
+            --env ZIPPY_WEBHOOK_SECRET_RELIABLE=ci-test-reliable-secret-not-real-0001 \
+            --env ZIPPY_AUTOMATION_ENABLED=false \
+            zippy:ci
+
+      - name: Wait for health endpoint
+        shell: bash
+        run: |
+          for attempt in {1..30}; do
+            if curl --fail --silent http://127.0.0.1:18080/api/health >/dev/null; then
+              exit 0
+            fi
+            sleep 2
+          done
+          docker logs zippy-ci
+          exit 1
+
+      - name: Smoke test UI and API
+        run: |
+          curl --fail --silent http://127.0.0.1:18080/ >/dev/null
+          test "$(curl --silent --output /dev/null --write-out '%{http_code}' http://127.0.0.1:18080/api/system/overview)" = "401"
+          curl --fail --silent \
+            --header "X-API-Key: ci-test-api-key-not-a-secret-00000001" \
+            http://127.0.0.1:18080/api/system/overview >/dev/null
+          curl --fail --silent \
+            --header "X-API-Key: ci-test-api-key-not-a-secret-00000001" \
+            http://127.0.0.1:18080/actuator/prometheus >/dev/null
+
+      - name: Show container logs on failure
+        if: failure()
+        run: docker logs zippy-ci
+
+      - name: Stop application image
+        if: always()
+        run: docker rm --force zippy-ci

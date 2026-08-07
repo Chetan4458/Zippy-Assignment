@@ -1,0 +1,20 @@
+spring:
+  datasource:
+    url: jdbc:h2:file:./data/zippy;MODE=PostgreSQL;DATABASE_TO_UPPER=false;AUTO_SERVER=TRUE
+    driverClassName: org.h2.Driver
+    username: ${ZIPPY_DB_USERNAME:sa}
+    password: ${ZIPPY_DB_PASSWORD:}
+
+server:
+  address: 127.0.0.1
+
+zippy:
+  security:
+    api-key:
+      enabled: false
+    webhooks:
+      enabled: false
+    cors:
+      allowed-origin-patterns:
+        - http://localhost:*
+        - http://127.0.0.1:*

@@ -1,4 +1,6 @@
 spring:
+  profiles:
+    default: test
   datasource:
     url: jdbc:h2:mem:zippytest;MODE=PostgreSQL;DATABASE_TO_UPPER=false;DB_CLOSE_DELAY=-1
     driverClassName: org.h2.Driver
@@ -9,3 +11,25 @@ spring:
 
 zippy:
   automation-enabled: false
+  security:
+    api-key:
+      enabled: false
+    webhooks:
+      enabled: false
+    cors:
+      allowed-origin-patterns:
+        - http://localhost:*
+        - http://127.0.0.1:*
+
+management:
+  endpoints:
+    web:
+      exposure:
+        include: health,info,prometheus
+  endpoint:
+    health:
+      show-details: never
+  prometheus:
+    metrics:
+      export:
+        enabled: true

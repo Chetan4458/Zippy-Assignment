@@ -1,0 +1,6 @@
+{
+  "reason": "Synthetic COD receipt after confirmed delivery",
+  "provider": "ZIPPY_DEMO_COD",
+  "reference": "cod-receipt-demo-20260807-0001",
+  "reconciliationReference": "cod-recon-demo-20260807-0001"
+}

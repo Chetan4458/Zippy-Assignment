@@ -3,11 +3,33 @@ backend/target/
 
 # Local runtime databases and logs
 data/*.sqlite*
+data/*.mv.db
+data/*.lock.db
+data/*.temp.db
+data/*.trace.db
 backend/data/*.mv.db
+backend/data/*.lock.db
+backend/data/*.temp.db
+backend/data/*.trace.db
 *.log
+.env
+.env.*
+!.env.example
 
 # Node dependencies and local tooling
 node_modules/
 
 # Generated frontend bundles (Docker rebuilds these)
-public/assets/
+public/
+dist/
+
+# Generated release and recovery material
+artifacts/
+backups/
+
+# Editor and OS metadata
+.agents/
+.idea/
+.vscode/
+.DS_Store
+Thumbs.db

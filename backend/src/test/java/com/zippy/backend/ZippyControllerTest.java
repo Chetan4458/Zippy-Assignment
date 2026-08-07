@@ -36,11 +36,13 @@ class ZippyControllerTest {
 
   @BeforeEach
   void resetDatabase() {
+    jdbcTemplate.execute("DELETE FROM payment_transactions");
     jdbcTemplate.execute("DELETE FROM shipment_events");
     jdbcTemplate.execute("DELETE FROM shipments");
     jdbcTemplate.execute("DELETE FROM shipping_quotes");
     jdbcTemplate.execute("DELETE FROM orders");
     jdbcTemplate.execute("DELETE FROM idempotency_keys");
+    jdbcTemplate.execute("DELETE FROM idempotency_locks");
     jdbcTemplate.execute("MERGE INTO app_meta (meta_key, meta_value) KEY(meta_key) VALUES ('order_sequence', '10000')");
     zippyService.resetRuntimeFlags();
   }

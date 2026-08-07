@@ -1,0 +1,11 @@
+{
+  "trackingCode": "RC1122334455",
+  "eventId": "RC-DELIVERED-10001",
+  "statusId": 50,
+  "statusText": "Delivered",
+  "updatedOn": "2026-08-07T15:45:00Z",
+  "proofOfDelivery": {
+    "receivedBy": "Rahul Sharma",
+    "deliveryLocation": "New Delhi"
+  }
+}
