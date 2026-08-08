@@ -117,15 +117,17 @@ export function PaymentTable({
   return (
     <section className="transaction-list" aria-labelledby="transaction-list-title" aria-busy={loading}>
       <div className="finance-section-head">
-        <div>
-          <p className="section-label">Filtered API snapshot</p>
+        <div className="finance-section-copy">
+          <p className="section-label">Filtered register</p>
           <h3 id="transaction-list-title">Payment register</h3>
+          <p>Choose a payment to inspect its immutable ledger, references, and available controls.</p>
         </div>
-        <span>{loading ? 'Refreshing...' : `${first}-${last} of ${total}`}</span>
+        <span className="result-count">{loading ? 'Refreshing...' : `${first}-${last} of ${total}`}</span>
       </div>
       {payments.length ? (
-        <div className="table-scroll" tabIndex={0} aria-label="Scrollable payment transactions">
+        <div className="table-scroll" role="region" tabIndex={0} aria-label="Payment register; scroll horizontally when needed">
           <table className="finance-table">
+            <caption className="sr-only">Filtered payment snapshots. Open a row to view its immutable transaction ledger.</caption>
             <thead>
               <tr>
                 <th scope="col">Transaction</th>
@@ -139,20 +141,25 @@ export function PaymentTable({
             <tbody>
               {payments.map((payment) => (
                 <tr key={payment.paymentId} className={selectedId === payment.paymentId ? 'selected-row' : ''}>
-                  <td>
-                    <strong>{payment.paymentId}</strong>
-                    <small>{payment.provider || 'Internal'}{payment.providerReference ? ` / ${payment.providerReference}` : ''}</small>
+                  <td data-label="Transaction">
+                    <strong className="identifier-value" title={payment.paymentId}>{payment.paymentId}</strong>
+                    <small className="secondary-identifier" title={`${payment.provider || 'Internal'}${payment.providerReference ? ` / ${payment.providerReference}` : ''}`}>
+                      {payment.provider || 'Internal'}{payment.providerReference ? ` / ${payment.providerReference}` : ''}
+                    </small>
                   </td>
-                  <td><strong>{payment.orderId}</strong><small>{formatDateTime(payment.createdAt)}</small></td>
-                  <td><span>{readableStatus(payment.paymentMethod)}</span><small>{payment.collectionStage ? readableStatus(payment.collectionStage) : 'Standard'}</small></td>
-                  <td className="numeric">
+                  <td data-label="Order">
+                    <strong className="identifier-value" title={payment.orderId}>{payment.orderId}</strong>
+                    <small>{formatDateTime(payment.createdAt)}</small>
+                  </td>
+                  <td data-label="Method"><span>{readableStatus(payment.paymentMethod)}</span><small>{payment.collectionStage ? readableStatus(payment.collectionStage) : 'Standard'}</small></td>
+                  <td data-label="Value" className="numeric">
                     <strong>{money(payment.amount)}</strong>
                     {Number(payment.refundedAmount) > 0
                       ? <small>{money(payment.refundedAmount)} refunded / {money(Number(payment.amount || 0) - Number(payment.refundedAmount || 0))} after refunds</small>
                       : <small>{payment.currency || 'INR'} / no refund</small>}
                   </td>
-                  <td><span className={`status-pill ${statusTone(payment.status)}`}>{readableStatus(payment.status)}</span><small>Updated {formatDateTime(payment.updatedAt)}</small></td>
-                  <td>
+                  <td data-label="Status"><span className={`status-pill ${statusTone(payment.status)}`}>{readableStatus(payment.status)}</span><small>Updated {formatDateTime(payment.updatedAt)}</small></td>
+                  <td data-label="Ledger">
                     <button
                       type="button"
                       className="ghost compact-button"
@@ -205,9 +212,10 @@ export function PaymentDetail({
   if (!payment) {
     return (
       <aside className="payment-detail empty-detail" aria-label="Payment ledger detail">
-        <p className="section-label">Ledger detail</p>
-        <h3>Select a transaction</h3>
-        <p>Open a payment row to inspect references, timestamps, and its immutable transaction history.</p>
+        <div className="empty-detail-mark" aria-hidden="true">L</div>
+        <p className="section-label">Ledger inspector</p>
+        <h3>Select a payment</h3>
+        <p>Open a register row to inspect references, timestamps, attribution, and immutable transaction history.</p>
       </aside>
     );
   }
@@ -219,9 +227,10 @@ export function PaymentDetail({
   return (
     <aside className="payment-detail" aria-labelledby="payment-detail-title" aria-busy={loading}>
       <div className="finance-section-head">
-        <div>
-          <p className="section-label">Ledger detail</p>
-          <h3 id="payment-detail-title">{payment.paymentId}</h3>
+        <div className="finance-section-copy">
+          <p className="section-label">Ledger inspector</p>
+          <h3 id="payment-detail-title" className="detail-identifier" title={payment.paymentId}>{payment.paymentId}</h3>
+          <p>Order <span className="inline-identifier" title={payment.orderId}>{payment.orderId}</span></p>
         </div>
         <span className={`status-pill ${statusTone(payment.status)}`}>{readableStatus(payment.status)}</span>
       </div>
@@ -229,13 +238,13 @@ export function PaymentDetail({
         <div><dt>Face value</dt><dd>{money(payment.amount)}</dd></div>
         <div><dt>Refunded</dt><dd>{money(payment.refundedAmount || 0)}</dd></div>
         <div><dt>Amount less refunds</dt><dd>{money(Number(payment.amount || 0) - Number(payment.refundedAmount || 0))}</dd></div>
-        <div><dt>Order</dt><dd>{payment.orderId}</dd></div>
+        <div><dt>Order</dt><dd title={payment.orderId}>{payment.orderId}</dd></div>
         <div><dt>Method</dt><dd>{readableStatus(payment.paymentMethod)}</dd></div>
         <div><dt>Provider</dt><dd>{payment.provider || 'Internal'}</dd></div>
-        <div><dt>Provider reference</dt><dd>{payment.providerReference || 'Not assigned'}</dd></div>
-        <div><dt>Reconciliation</dt><dd>{payment.reconciliationReference || 'Not assigned'}</dd></div>
-        <div><dt>Refund reference</dt><dd>{payment.refundReference || 'Not assigned'}</dd></div>
-        <div><dt>Refund reconciliation</dt><dd>{payment.refundReconciliationReference || 'Not assigned'}</dd></div>
+        <div><dt>Provider reference</dt><dd title={payment.providerReference || undefined}>{payment.providerReference || 'Not assigned'}</dd></div>
+        <div><dt>Reconciliation</dt><dd title={payment.reconciliationReference || undefined}>{payment.reconciliationReference || 'Not assigned'}</dd></div>
+        <div><dt>Refund reference</dt><dd title={payment.refundReference || undefined}>{payment.refundReference || 'Not assigned'}</dd></div>
+        <div><dt>Refund reconciliation</dt><dd title={payment.refundReconciliationReference || undefined}>{payment.refundReconciliationReference || 'Not assigned'}</dd></div>
         <div><dt>Created</dt><dd>{formatDateTime(payment.createdAt)}</dd></div>
         <div><dt>Last updated</dt><dd>{formatDateTime(payment.updatedAt)}</dd></div>
         {payment.capturedAt ? <div><dt>Captured</dt><dd>{formatDateTime(payment.capturedAt)}</dd></div> : null}
@@ -403,16 +412,35 @@ export function ReportFilterBar({ filters, error, onPreset, onChange, onApply })
   );
 }
 
-export function DailyTrend({ rows }) {
+export function DailyTrend({ rows, loading = false, error = '', onRetry, rangeLabel = 'All available UTC dates' }) {
   const trend = normalizeDailyTrend(rows);
   const maximum = Math.max(1, ...trend.flatMap((row) => [row.grossCollected, row.refunds, Math.abs(row.netCollected)]));
   return (
-    <figure className="trend-card" aria-labelledby="trend-title">
+    <figure id="daily-trends" className="trend-card" aria-labelledby="trend-title" aria-busy={loading}>
       <figcaption>
-        <div><p className="section-label">Daily movement</p><h3 id="trend-title">Collections and refunds</h3></div>
-        <div className="trend-legend" aria-label="Chart legend"><span className="gross">Gross</span><span className="refunds">Refunds</span><span className="net">Net</span></div>
+        <div>
+          <p className="section-label">Cash-flow visualization</p>
+          <h3 id="trend-title">Daily Trends</h3>
+          <p className="trend-description">Gross collections, completed refunds, and net cash movement by transaction-event day.</p>
+        </div>
+        <div className="trend-context">
+          <span className="trend-period">{rangeLabel}</span>
+          <div className="trend-legend" aria-label="Chart legend"><span className="gross">Gross</span><span className="refunds">Refunds</span><span className="net">Net</span></div>
+        </div>
       </figcaption>
-      {trend.length ? (
+      {loading && !trend.length ? (
+        <div className="trend-state loading-state" role="status">
+          <span className="loading-dot" aria-hidden="true" />
+          <div><strong>Loading daily trends</strong><p>Calculating UTC cash movement for the selected reporting scope.</p></div>
+        </div>
+      ) : error && !trend.length ? (
+        <div className="trend-state error-state" role="alert">
+          <div><strong>Daily trends are unavailable</strong><p>{error}</p></div>
+          {onRetry ? <button type="button" className="ghost" onClick={onRetry}>Retry report</button> : null}
+        </div>
+      ) : trend.length ? (
+        <>
+          {loading ? <p className="trend-refresh-note" role="status">Refreshing daily trends; the previous snapshot remains visible.</p> : null}
         <ol className="trend-list">
           {trend.map((row) => (
             <li key={row.date}>
@@ -426,7 +454,12 @@ export function DailyTrend({ rows }) {
             </li>
           ))}
         </ol>
-      ) : <div className="empty">No daily finance movement exists for this period.</div>}
+        </>
+      ) : (
+        <div className="trend-state empty-trend">
+          <div><strong>No daily cash movement</strong><p>No collections or completed refunds match this reporting period. Try a wider date range or clear a payment filter.</p></div>
+        </div>
+      )}
     </figure>
   );
 }

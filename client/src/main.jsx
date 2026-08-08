@@ -1262,6 +1262,11 @@ function App() {
   const visiblePaymentHistory = paymentHistory;
   const paymentFinance = financeSnapshot(paymentReport, visiblePaymentHistory);
   const reportFinance = financeSnapshot(reportsSummary, reportPaymentHistory);
+  const reportTrendRange = reportsSummary?.filters?.fromInclusive && reportsSummary?.filters?.toExclusive
+    ? `UTC ${String(reportsSummary.filters.fromInclusive).slice(0, 10)} to before ${String(reportsSummary.filters.toExclusive).slice(0, 10)}`
+    : reportFilters.from && reportFilters.to
+      ? `Requested UTC period: ${reportFilters.from} through ${reportFilters.to}`
+      : 'All available UTC dates';
   const metrics = [
     { label: 'Quotes', value: String(rates.length || order?.shippingOptions?.length || 0), tone: 'accent' },
     { label: 'Current status', value: currentStatus ? readableStatus(currentStatus) : 'No active order', tone: statusTone(currentStatus) },
@@ -1863,6 +1868,16 @@ function App() {
               <FinanceMetric label="Failed attempts" value={String(paymentFinance.failed)} detail="Operational exceptions in this scope" tone={paymentFinance.failed ? 'danger' : 'neutral'} />
             </div>
 
+            <section className="finance-insight-link" aria-labelledby="payments-trend-title">
+              <div className="insight-monogram" aria-hidden="true">D</div>
+              <div>
+                <p className="section-label">Finance intelligence</p>
+                <h3 id="payments-trend-title">Daily Trends</h3>
+                <p>Review gross collections, completed refunds, net movement, and transaction volume by UTC day.</p>
+              </div>
+              <button type="button" className="ghost" onClick={() => startTransition(() => setScreen('reports'))}>Open Daily Trends</button>
+            </section>
+
             {order ? (
               <section className="active-finance-card" aria-labelledby="active-finance-title">
                 <div>
@@ -2046,14 +2061,16 @@ function App() {
 
             {reportsError && reportsSummary ? <div className="notice warning" role="status">Showing the last successful report snapshot. Refresh failed: {reportsError}</div> : null}
             {reportsSummary && !reportsSummary.finance ? <div className="notice warning" role="status">Legacy finance response detected. Cash metrics are calculated only from the loaded payment page.</div> : null}
-            {loadingReports && !reportsSummary ? (
-              <div className="empty">Loading finance report...</div>
-            ) : reportsError && !reportsSummary ? (
-              <div className="empty error-state" role="alert">
-                <span>{reportsError}</span>
-                <button type="button" className="ghost" onClick={() => setReportRefreshKey((value) => value + 1)}>Retry report</button>
-              </div>
-            ) : reportsSummary ? (
+
+            <DailyTrend
+              rows={reportsSummary?.dailyTrend || []}
+              loading={loadingReports || (!reportsSummary && !reportsError)}
+              error={!reportsSummary ? reportsError : ''}
+              rangeLabel={reportTrendRange}
+              onRetry={() => setReportRefreshKey((value) => value + 1)}
+            />
+
+            {reportsSummary ? (
               <>
                 <section className="report-scope" aria-labelledby="report-scope-title">
                   <div>
@@ -2105,8 +2122,6 @@ function App() {
                   />
                 </div>
 
-                <DailyTrend rows={reportsSummary.dailyTrend || []} />
-
                 <div className="breakdown-grid">
                   <BreakdownPanel
                     title="Carrier shipping cost"
@@ -2137,9 +2152,7 @@ function App() {
                   <button type="button" className="ghost" disabled={!reportPaymentHistory.length} onClick={() => downloadPaymentsCsv(reportPaymentHistory)}>Export shown rows</button>
                 </section>
               </>
-            ) : (
-              <div className="empty">Apply a reporting period to load finance metrics.</div>
-            )}
+            ) : null}
           </section>
         ) : null}
       </section>
