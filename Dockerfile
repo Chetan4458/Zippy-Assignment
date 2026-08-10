@@ -1,4 +1,4 @@
-FROM node:24-slim AS frontend-dependencies
+FROM node:26-slim AS frontend-dependencies
 WORKDIR /app
 COPY package.json package-lock.json ./
 RUN npm ci --no-audit --no-fund
@@ -11,14 +11,14 @@ RUN npm run test:frontend
 FROM frontend-test AS frontend-build
 RUN npm run build
 
-FROM maven:3.9.9-eclipse-temurin-21 AS backend-build
+FROM maven:3.9.15-eclipse-temurin-26 AS backend-build
 WORKDIR /app
 COPY backend/pom.xml ./backend/pom.xml
 RUN mvn -q -f backend/pom.xml dependency:go-offline
 COPY backend/src ./backend/src
 RUN mvn -q -f backend/pom.xml package
 
-FROM eclipse-temurin:21-jre-jammy AS runtime
+FROM eclipse-temurin:25-jre-jammy AS runtime
 WORKDIR /app
 ENV SPRING_PROFILES_ACTIVE=prod
 RUN apt-get update \
